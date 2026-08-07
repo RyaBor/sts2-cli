@@ -17,3 +17,4 @@ saves/*
 __pycache__/
 rl/checkpoints/
 rl/runs/
+rl/dashboard.html

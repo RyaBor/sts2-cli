@@ -19,6 +19,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 
+from rl.callbacks import CombatMetricsCallback
 from rl.env import Sts2CombatEnv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -86,8 +87,10 @@ def main() -> None:
         name_prefix=args.name,
     )
 
+    callbacks = [ckpt, CombatMetricsCallback()]
+
     try:
-        model.learn(total_timesteps=args.steps, callback=ckpt,
+        model.learn(total_timesteps=args.steps, callback=callbacks,
                     tb_log_name=args.name, reset_num_timesteps=not args.resume)
     finally:
         final = os.path.join(ckpt_dir, f"{args.name}_final")

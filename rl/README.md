@@ -30,6 +30,35 @@ Checkpoints land in `rl/checkpoints/`, TensorBoard logs in `rl/runs/`:
 .venv/Scripts/python.exe -m tensorboard.main --logdir rl/runs
 ```
 
+## Metrics and dashboard
+
+Training logs the usual PPO diagnostics plus combat-specific metrics that SB3
+does not provide on its own (`rl/callbacks.py`):
+
+| Metric | Why it matters |
+| --- | --- |
+| `combat/win_rate` | The actual objective |
+| `combat/hp_retained_on_win` | The real signal on easy encounters, where win rate saturates at 100% |
+| `combat/invalid_actions` | Must stay **0** — a climbing count means the action mask and the engine disagree about legality |
+| `combat/engine_errors` | Engine crashes swallowed as lost episodes |
+
+**Live monitoring** during a run:
+
+```bash
+.venv/Scripts/python.exe -m tensorboard.main --logdir rl/runs
+```
+
+**Standalone report** — one self-contained HTML file, no external requests, safe
+to share or open directly. Overlays multiple runs for comparison, and every
+chart has a table view:
+
+```bash
+.venv/Scripts/python.exe rl/dashboard.py --open
+```
+
+`--run <name>` restricts it to one run, `--out <path>` changes the destination.
+The generated `rl/dashboard.html` is gitignored — regenerate it after each run.
+
 ## Evaluate
 
 Reports win rate, average HP remaining on wins, and episode length against a
@@ -67,6 +96,8 @@ train against a mix:
 | `train.py` | MaskablePPO over `SubprocVecEnv` |
 | `eval.py` | Checkpoint vs random baseline |
 | `encounters.py` | Encounter ids by tier, with a loadability check |
+| `callbacks.py` | Logs win rate / HP retained / mask violations to TensorBoard |
+| `dashboard.py` | Generates a standalone HTML metrics report |
 
 ## Design notes
 
