@@ -12,10 +12,20 @@ Usage:
 import json
 import subprocess
 import sys
+import threading
 import os
 import argparse
 import random
 from game_log import GameLogger
+
+# Windows terminals default to cp1252, which cannot encode the box-drawing
+# characters and em-dashes used throughout this UI — printing one raises
+# UnicodeEncodeError and kills the run. Force UTF-8 on the console streams.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
@@ -1503,6 +1513,15 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, bufsize=1,
     )
+
+    # Drain the engine's stderr continuously. It logs heavily during startup
+    # (model registration, asset warnings); if nobody reads this pipe it fills,
+    # the engine blocks writing to it, and never answers on stdout — deadlock.
+    def _drain_stderr():
+        for _ in iter(proc.stderr.readline, ""):
+            pass
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
 
     def read():
         while True:
