@@ -1,0 +1,11 @@
+# Install into .venv, then replace torch with the CUDA build for your GPU:
+#   .venv/Scripts/python.exe -m pip install -r rl/requirements.txt
+#   .venv/Scripts/python.exe -m pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128
+#
+# The cu128 index is required for Blackwell cards (RTX 50xx, compute 12.0).
+# Plain `pip install torch` yields a CPU-only build on Windows.
+numpy
+gymnasium
+stable-baselines3>=2.3
+sb3-contrib
+tensorboard

@@ -13,3 +13,7 @@ obj/
 .obsidian/
 logs/
 saves/*
+.venv/
+__pycache__/
+rl/checkpoints/
+rl/runs/
