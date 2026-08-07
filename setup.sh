@@ -63,6 +63,7 @@ DLLS=(
     "MonoMod.ILHelpers.dll"
     "0Harmony.dll"
     "System.IO.Hashing.dll"
+    "Sentry.Godot.dll"
 )
 
 echo ""

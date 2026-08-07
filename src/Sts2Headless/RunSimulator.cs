@@ -28,8 +28,20 @@ using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Unlocks;
+using MegaCrit.Sts2.Core.Modding;
 
 namespace Sts2Headless;
+
+/// <summary>No-op mod file IO — headless mode has no mods directory to scan.</summary>
+internal class NoOpModManagerFileIo : IModManagerFileIo
+{
+    public string[] GetFilesAt(string path) => Array.Empty<string>();
+    public string[] GetDirectoriesAt(string path) => Array.Empty<string>();
+    public bool FileExists(string path) => false;
+    public bool DirectoryExists(string path) => false;
+    public System.IO.Stream OpenStream(string path, Godot.FileAccess.ModeFlags mode) =>
+        throw new System.IO.FileNotFoundException(path);
+}
 
 /// <summary>
 /// Synchronization context that executes continuations inline immediately.
@@ -517,7 +529,7 @@ public class RunSimulator
             Log($"RunState created, players={_runState.Players?.Count}");
 
             var netService = new NetSingleplayerGameService();
-            RunManager.Instance.SetUpSavedSinglePlayer(_runState, save);
+            RunManager.Instance.SetUpSavedSingleplayer(_runState, save).GetAwaiter().GetResult();
             LocalContext.NetId = netService.NetId;
 
             CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
@@ -3120,6 +3132,20 @@ public class RunSimulator
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
 
+        // Initialize ModManager (no mods dir) — ReflectionHelper.ModTypes requires this
+        // to have run before ModelDb.Inject can query subtypes.
+        try
+        {
+            var gameVersion = MegaCrit.Sts2.Core.Debug.SemanticVersion.FromString("0.110.1");
+            ModManager.Initialize(new NoOpModManagerFileIo(), new MegaCrit.Sts2.Core.Modding.ModSettings(), gameVersion)
+                .GetAwaiter().GetResult();
+            Console.Error.WriteLine("[INFO] ModManager initialized");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] ModManager.Initialize: {ex.GetType().Name}: {ex.Message}");
+        }
+
         var subtypes = MegaCrit.Sts2.Core.Models.AbstractModelSubtypes.All;
         int registered = 0, failed = 0;
         for (int i = 0; i < subtypes.Count; i++)
@@ -3142,6 +3168,10 @@ public class RunSimulator
         // Initialize net ID serialization cache (needed for combat actions)
         try
         {
+            // ContentSorter (used by the cache) requires AssemblyInfo to be
+            // initialized first, otherwise Init throws and every later
+            // net-id lookup fails (breaks card rewards, shops, saves).
+            MegaCrit.Sts2.Core.Modding.AssemblyInfo.Init();
             ModelIdSerializationCache.Init();
             Console.Error.WriteLine("[INFO] ModelIdSerializationCache initialized");
         }
@@ -3734,7 +3764,7 @@ public class RunSimulator
             try
             {
                 await CreatureCmd.Damage(ctx, play.Target!, card.DynamicVars.Damage.BaseValue,
-                    MegaCrit.Sts2.Core.ValueProps.ValueProp.Move, card);
+                    MegaCrit.Sts2.Core.ValueProps.ValueProp.Move, card, play);
                 await PowerCmd.Apply<WeakPower>(ctx, play.Target!, card.DynamicVars["WeakPower"].BaseValue,
                     card.Owner.Creature, card, false);
             }
