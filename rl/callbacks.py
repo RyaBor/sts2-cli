@@ -16,6 +16,7 @@ class CombatMetricsCallback(BaseCallback):
         super().__init__(verbose)
         self.wins: deque[float] = deque(maxlen=window)
         self.hp: deque[float] = deque(maxlen=window)
+        self.timeouts: deque[float] = deque(maxlen=window)
         self.invalid = 0
         self.engine_errors = 0
 
@@ -32,6 +33,7 @@ class CombatMetricsCallback(BaseCallback):
                 continue
             won = outcome == "win"
             self.wins.append(1.0 if won else 0.0)
+            self.timeouts.append(1.0 if outcome == "timeout" else 0.0)
             if won:
                 self.hp.append(float(info.get("final_hp") or 0.0))
 
@@ -39,6 +41,10 @@ class CombatMetricsCallback(BaseCallback):
             self.logger.record("combat/win_rate", sum(self.wins) / len(self.wins))
         if self.hp:
             self.logger.record("combat/hp_retained_on_win", sum(self.hp) / len(self.hp))
+        # Should stay near zero. A rising rate means the agent found stalling
+        # more attractive than committing to a kill.
+        if self.timeouts:
+            self.logger.record("combat/timeout_rate", sum(self.timeouts) / len(self.timeouts))
         # Should stay flat at zero; a climbing count means the action mask and
         # the engine disagree about legality.
         self.logger.record("combat/invalid_actions", self.invalid)

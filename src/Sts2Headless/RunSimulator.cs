@@ -2277,6 +2277,9 @@ public class RunSimulator
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
+                    // Stable model id as well as the display name: the localized
+                    // name is not usable as an identity feature by an agent.
+                    ["id"] = e.Monster?.Id.Entry ?? "UNKNOWN",
                     ["name"] = _loc.Monster(e.Monster?.Id.Entry ?? "UNKNOWN"),
                     ["hp"] = e.CurrentHp,
                     ["max_hp"] = e.MaxHp,
@@ -2309,6 +2312,14 @@ public class RunSimulator
             ["player_powers"] = playerPowers?.Count > 0 ? playerPowers : null,
             ["draw_pile_count"] = pcs?.DrawPile?.Cards?.Count ?? 0,
             ["discard_pile_count"] = pcs?.DiscardPile?.Cards?.Count ?? 0,
+            ["exhaust_pile_count"] = pcs?.ExhaustPile?.Cards?.Count ?? 0,
+            // Pile contents, so an agent has the same information a player does.
+            // The draw pile is deliberately sorted: a player can inspect what is
+            // left but not the draw order, and emitting true order would hand the
+            // agent knowledge of its next draw.
+            ["draw_pile"] = PileContents(pcs?.DrawPile, sorted: true),
+            ["discard_pile"] = PileContents(pcs?.DiscardPile, sorted: true),
+            ["exhaust_pile"] = PileContents(pcs?.ExhaustPile, sorted: true),
         };
 
         // Character-specific mechanics
@@ -2977,6 +2988,26 @@ public class RunSimulator
         catch { return null; }
     }
 
+    /// <summary>
+    /// Compact contents of a card pile: one entry per card, id plus an upgrade
+    /// marker. Ids only (not full card objects) because this is serialized on
+    /// every combat step and full objects would dominate the payload.
+    /// </summary>
+    private static List<string>? PileContents(MegaCrit.Sts2.Core.Entities.Cards.CardPile? pile,
+                                              bool sorted)
+    {
+        var cards = pile?.Cards;
+        if (cards == null) return null;
+        var ids = new List<string>(cards.Count);
+        foreach (var c in cards)
+        {
+            if (c == null) continue;
+            ids.Add(c.IsUpgraded ? c.Id.Entry + "+" : c.Id.Entry);
+        }
+        if (sorted) ids.Sort(StringComparer.Ordinal);
+        return ids;
+    }
+
     private Dictionary<string, object?> PlayerSummary(Player player)
     {
         return new Dictionary<string, object?>
@@ -2992,6 +3023,7 @@ public class RunSimulator
                 try { foreach (var dv in r.DynamicVars.Values) vars[dv.Name] = (int)dv.BaseValue; } catch { }
                 return new Dictionary<string, object?>
                 {
+                    ["id"] = r.Id.Entry,
                     ["name"] = _loc.Relic(r.Id.Entry),
                     ["description"] = _loc.Bilingual("relics", r.Id.Entry + ".description"),
                     ["vars"] = vars.Count > 0 ? vars : null,
@@ -3005,6 +3037,9 @@ public class RunSimulator
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
+                    ["id"] = p.Id.Entry,
+                    // Needed to know whether drinking this needs a target_index.
+                    ["target_type"] = p.TargetType.ToString(),
                     ["name"] = _loc.Potion(p.Id.Entry),
                     ["description"] = _loc.Bilingual("potions", p.Id.Entry + ".description"),
                     ["vars"] = pvars.Count > 0 ? pvars : null,

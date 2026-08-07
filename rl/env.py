@@ -12,17 +12,30 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .encoding import (N_ACTIONS, OBS_DIM, action_mask, decode_action,
-                       encode_obs)
+from .encoding import (N_ACTIONS, action_mask, decode_action, encode_obs,
+                       observation_space)
 from .engine import Engine, EngineError
 
-# Reward shaping. Terminal outcome dominates; the per-HP terms give dense
-# signal so the agent learns to block and to kill fast, not just to survive.
-R_WIN = 1.0
-R_LOSS = -1.0
-R_DMG_DEALT = 0.010   # per enemy HP removed
-R_HP_LOST = -0.020    # per player HP lost
-R_STEP = -0.001       # mild pressure against stalling
+# Reward shaping, tuned to prioritise HP carried out of the fight.
+#
+# A win is worth `win` plus `win_hp` scaled by the fraction of max HP left, so
+# the terminal reward mostly ranks *how* you won: a full-HP win pays 2.0, a
+# 1-HP win pays ~0.5. Damage-dealt shaping is deliberately small — it rewards
+# racing, which trades HP for speed — but not zero, since it is what gets an
+# untrained agent to attack at all.
+#
+# `timeout` matters more than it looks: without a penalty for hitting the step
+# limit, stalling forever scores better than losing, so a HP-hungry agent can
+# learn to block and never commit.
+DEFAULT_REWARDS = {
+    "win": 0.5,          # flat, for winning at all
+    "win_hp": 1.5,       # scaled by hp_remaining / max_hp
+    "loss": -1.0,
+    "timeout": -1.0,     # hitting max_steps is a failure, not a draw
+    "dmg_dealt": 0.002,  # per enemy HP removed
+    "hp_lost": -0.020,   # per player HP lost (dense form of the terminal term)
+    "step": -0.001,
+}
 
 
 class Sts2CombatEnv(gym.Env):
@@ -31,9 +44,10 @@ class Sts2CombatEnv(gym.Env):
     def __init__(self, character: str = "Ironclad",
                  encounter: str | list[str] | None = "SHRINKER_BEETLE_WEAK",
                  ascension: int = 0, seed: str | None = None,
-                 start_hp: int = 80, max_hp: int = 80, max_steps: int = 300):
+                 start_hp: int = 80, max_hp: int = 80, max_steps: int = 300,
+                 rewards: dict[str, float] | None = None):
         super().__init__()
-        self.observation_space = spaces.Box(-10.0, 10.0, (OBS_DIM,), dtype=np.float32)
+        self.observation_space = observation_space()
         self.action_space = spaces.Discrete(N_ACTIONS)
 
         self.character = character
@@ -43,6 +57,7 @@ class Sts2CombatEnv(gym.Env):
         self.start_hp = start_hp
         self.max_hp = max_hp
         self.max_steps = max_steps
+        self.r = {**DEFAULT_REWARDS, **(rewards or {})}
         self._seed = seed
 
         self.engine: Engine | None = None
@@ -66,7 +81,7 @@ class Sts2CombatEnv(gym.Env):
     def _player_hp(st: dict) -> float:
         return float((st.get("player") or {}).get("hp") or 0)
 
-    def _obs(self) -> np.ndarray:
+    def _obs(self) -> dict[str, np.ndarray]:
         return encode_obs(self.state)
 
     def action_masks(self) -> np.ndarray:
@@ -107,7 +122,7 @@ class Sts2CombatEnv(gym.Env):
             nxt = self.engine.act(name, **args)
         except EngineError:
             # Treat a dead engine as a lost episode rather than crashing training.
-            return self._obs(), R_LOSS, True, False, {"engine_error": True}
+            return self._obs(), self.r["loss"], True, False, {"engine_error": True}
 
         self._steps += 1
 
@@ -116,7 +131,7 @@ class Sts2CombatEnv(gym.Env):
             return self._obs(), -0.05, False, False, {"invalid": nxt.get("message")}
 
         decision = nxt.get("decision")
-        reward = R_STEP
+        reward = self.r["step"]
         terminated = False
         info: dict[str, Any] = {}
 
@@ -124,21 +139,33 @@ class Sts2CombatEnv(gym.Env):
             self.state = nxt
             player_hp = self._player_hp(nxt)
             enemy_hp = self._enemy_hp_total(nxt)
-            reward += R_DMG_DEALT * max(0.0, self._prev_enemy_hp - enemy_hp)
-            reward += R_HP_LOST * max(0.0, self._prev_player_hp - player_hp)
+            reward += self.r["dmg_dealt"] * max(0.0, self._prev_enemy_hp - enemy_hp)
+            reward += self.r["hp_lost"] * max(0.0, self._prev_player_hp - player_hp)
             self._prev_player_hp = player_hp
             self._prev_enemy_hp = enemy_hp
         else:
             # Left the combat screen: either we won, or the run ended in death.
             terminated = True
-            died = decision == "game_over" or self._player_hp(nxt) <= 0
-            reward += R_LOSS if died else R_WIN
+            final_hp = self._player_hp(nxt)
+            died = decision == "game_over" or final_hp <= 0
+            if died:
+                reward += self.r["loss"]
+            else:
+                # Rank wins by HP carried out, not just by winning.
+                reward += self.r["win"] + self.r["win_hp"] * min(
+                    1.0, final_hp / max(float(self.max_hp), 1.0))
             info["outcome"] = "loss" if died else "win"
-            info["final_hp"] = self._player_hp(nxt)
+            info["final_hp"] = final_hp
             # Keep last combat obs; engine is left on the post-combat screen and
             # reset_combat() will clear it.
 
-        truncated = self._steps >= self.max_steps
+        truncated = self._steps >= self.max_steps and not terminated
+        if truncated:
+            # Without this, stalling out the clock beats losing, so an agent
+            # rewarded for HP can learn to block forever and never commit.
+            reward += self.r["timeout"]
+            info["outcome"] = "timeout"
+            info["final_hp"] = self._player_hp(nxt)
         return self._obs(), float(reward), terminated, truncated, info
 
     def close(self):
