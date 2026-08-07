@@ -53,13 +53,18 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--episodes", type=int, default=200)
     ap.add_argument("--character", default="Ironclad")
-    ap.add_argument("--encounter", default="SHRINKER_BEETLE_WEAK")
+    ap.add_argument("--encounter", default="SHRINKER_BEETLE_WEAK",
+                    help="comma-separated encounter ids, or 'default'")
     ap.add_argument("--hp", type=int, default=80)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-baseline", action="store_true")
     args = ap.parse_args()
 
-    cfg = dict(character=args.character, encounter=args.encounter,
+    # Match train.py: accept a list so a policy can be evaluated on the same
+    # mix it was trained on.
+    encounters = (None if args.encounter == "default"
+                  else [e.strip() for e in args.encounter.split(",") if e.strip()])
+    cfg = dict(character=args.character, encounter=encounters,
                start_hp=args.hp, max_hp=args.hp)
 
     if not args.no_baseline:
