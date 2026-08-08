@@ -83,6 +83,13 @@ def intents() -> Vocab:
 
 
 @lru_cache(maxsize=1)
+def powers() -> Vocab:
+    """Buffs and debuffs — Weak, Vulnerable, Frail, Strength and the rest.
+    Without these the agent cannot see what the enemy has done to it."""
+    return Vocab(_ids_from("powers.json"), "powers")
+
+
+@lru_cache(maxsize=1)
 def encounters() -> Vocab:
     """Boss/encounter ids. `context.boss.id` is an encounter id (THE_KIN_BOSS),
     not a monster id, so it needs its own table."""
@@ -97,6 +104,7 @@ def sizes() -> dict[str, int]:
         "potions": len(potions()),
         "intents": len(intents()),
         "encounters": len(encounters()),
+        "powers": len(powers()),
     }
 
 

@@ -8,6 +8,7 @@ knob. Watch progress with:  tensorboard --logdir rl/runs
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -21,6 +22,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from rl.callbacks import CombatMetricsCallback
 from rl.env import DEFAULT_REWARDS, Sts2CombatEnv
 from rl.extractor import EntityAttentionExtractor
+from rl import cardpool
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -52,7 +54,26 @@ def main() -> None:
     ap.add_argument("--reward", action="append", default=[], metavar="KEY=VALUE",
                     help="override a reward weight, e.g. --reward win_hp=2.5 "
                          "(keys: win, win_hp, loss, timeout, dmg_dealt, hp_lost, step)")
+    ap.add_argument("--snapshots", default=None,
+                    help="jsonl of realistic loadouts from rl/runner.py")
+    ap.add_argument("--deck-noise", type=float, default=0.0,
+                    help="fraction of each snapshot deck replaced with random "
+                         "cards, to cover builds the drafter never produces")
     args = ap.parse_args()
+
+    snapshots = None
+    if args.snapshots:
+        with open(args.snapshots, encoding="utf-8") as f:
+            snapshots = [json.loads(line) for line in f if line.strip()]
+        acts = sorted({s.get("act") for s in snapshots})
+        decks = [len(s.get("deck") or []) for s in snapshots]
+        print(f"{len(snapshots)} snapshots | acts {acts} | "
+              f"deck size {min(decks)}-{max(decks)} (mean {sum(decks)/len(decks):.1f})")
+
+    pool = None
+    if args.deck_noise > 0:
+        pool = cardpool.valid_cards()
+        print(f"deck noise {args.deck_noise:.0%} over {len(pool)} cards")
 
     rewards = {}
     for item in args.reward:
@@ -68,7 +89,8 @@ def main() -> None:
                   else [e.strip() for e in args.encounter.split(",") if e.strip()])
     cfg = dict(character=args.character, encounter=encounters,
                ascension=args.ascension, start_hp=args.hp, max_hp=args.hp,
-               rewards=rewards or None)
+               rewards=rewards or None, snapshots=snapshots,
+               deck_noise=args.deck_noise, card_pool=pool)
 
     venv = SubprocVecEnv([_make(i, cfg) for i in range(args.envs)], start_method="spawn")
     venv = VecMonitor(venv)

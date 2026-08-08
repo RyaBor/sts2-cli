@@ -38,6 +38,8 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         self.intent_emb = nn.Embedding(sizes["intents"], d, padding_idx=0)
         # Boss ids are encounter ids, not monster ids.
         self.boss_emb = nn.Embedding(sizes["encounters"], d, padding_idx=0)
+        # Buffs/debuffs. Scaled by amount so 3 Vulnerable differs from 1.
+        self.power_emb = nn.Embedding(sizes["powers"], d, padding_idx=0)
 
         # One learned marker per entity kind, so attention can tell a card
         # token from an enemy token after they are pooled into one sequence.
@@ -46,7 +48,7 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         self.hand_proj = nn.Linear(HAND_FEATS, d)
         self.enemy_proj = nn.Linear(ENEMY_FEATS, d)
         # Global token also carries the three pile summaries and the boss id.
-        self.global_proj = nn.Linear(GLOBAL_FEATS + 4 * d, d)
+        self.global_proj = nn.Linear(GLOBAL_FEATS + 5 * d, d)
 
         layer = nn.TransformerEncoderLayer(
             d_model=d, nhead=n_heads, dim_feedforward=d * 4,
@@ -59,6 +61,10 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         """Sum embeddings over a padded id list (padding_idx contributes 0)."""
         return emb(ids.long()).sum(dim=1)
 
+    def _powers(self, ids: torch.Tensor, amts: torch.Tensor) -> torch.Tensor:
+        """Amount-weighted sum of power embeddings over the last axis."""
+        return (self.power_emb(ids.long()) * amts.unsqueeze(-1)).sum(dim=-2)
+
     def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         b = obs["global"].shape[0]
         dev = obs["global"].device
@@ -68,6 +74,8 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
             self._bag(self.card_emb, obs["discard_ids"]),
             self._bag(self.card_emb, obs["exhaust_ids"]),
             self.boss_emb(obs["boss_id"].long()).squeeze(1),
+            # What the enemy has done to us: Weak, Vulnerable, Frail, ...
+            self._powers(obs["player_power_ids"], obs["player_power_amts"]),
         ], dim=-1)
         g = self.global_proj(torch.cat([obs["global"], piles], dim=-1))
         g = g + self.kind_emb(torch.zeros(b, dtype=torch.long, device=dev))
@@ -79,7 +87,8 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         # An enemy token is its identity, its numbers, and what it is about to do.
         intents = self.intent_emb(obs["enemy_intents"].long()).sum(dim=2)
         enemy = (self.monster_emb(obs["enemy_ids"].long())
-                 + self.enemy_proj(obs["enemy_feats"]) + intents)
+                 + self.enemy_proj(obs["enemy_feats"]) + intents
+                 + self._powers(obs["enemy_power_ids"], obs["enemy_power_amts"]))
         enemy = enemy + self.kind_emb(
             torch.full((b, 1), 2, dtype=torch.long, device=dev))
 

@@ -6,6 +6,7 @@ learning that they do nothing.
 """
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import gymnasium as gym
@@ -45,7 +46,9 @@ class Sts2CombatEnv(gym.Env):
                  encounter: str | list[str] | None = "SHRINKER_BEETLE_WEAK",
                  ascension: int = 0, seed: str | None = None,
                  start_hp: int = 80, max_hp: int = 80, max_steps: int = 300,
-                 rewards: dict[str, float] | None = None):
+                 rewards: dict[str, float] | None = None,
+                 snapshots: list[dict] | None = None,
+                 deck_noise: float = 0.0, card_pool: list[str] | None = None):
         super().__init__()
         self.observation_space = observation_space()
         self.action_space = spaces.Discrete(N_ACTIONS)
@@ -58,9 +61,20 @@ class Sts2CombatEnv(gym.Env):
         self.max_hp = max_hp
         self.max_steps = max_steps
         self.r = {**DEFAULT_REWARDS, **(rewards or {})}
+        # Realistic loadouts captured from full runs (see runner.py). When
+        # present these drive the episode instead of the starter deck, so the
+        # agent trains on decks and relics people actually have.
+        self.snapshots = snapshots or []
+        # Snapshots alone only span the builds the drafter happens to produce.
+        # Replacing a fraction of each deck with cards drawn from the whole pool
+        # widens coverage into the tail, so advice on an unusual deck is not
+        # pure extrapolation. Shape stays realistic; contents get perturbed.
+        self.deck_noise = float(deck_noise)
+        self.card_pool = card_pool or []
         self._seed = seed
 
         self.engine: Engine | None = None
+        self._respawns = 0
         self.state: dict[str, Any] = {}
         self._steps = 0
         self._prev_player_hp = 0.0
@@ -94,20 +108,47 @@ class Sts2CombatEnv(gym.Env):
         self._ensure_engine()
         assert self.engine is not None
         enc = self.encounters[self.np_random.integers(len(self.encounters))]
+        kw: dict[str, Any] = {"hp": self.start_hp, "max_hp": self.max_hp}
+        if self.snapshots:
+            snap = self.snapshots[self.np_random.integers(len(self.snapshots))]
+            kw = {
+                "hp": snap.get("hp") or self.start_hp,
+                "max_hp": snap.get("max_hp") or self.max_hp,
+                "deck": snap.get("deck") or None,
+                "relics": snap.get("relics") or None,
+            }
+            self._max_hp_now = float(kw["max_hp"] or self.max_hp)
+            if snap.get("encounter"):
+                enc = snap["encounter"]
+            deck = kw.get("deck")
+            if deck and self.deck_noise > 0.0 and self.card_pool:
+                deck = list(deck)
+                for i in range(len(deck)):
+                    if self.np_random.random() < self.deck_noise:
+                        deck[i] = self.card_pool[
+                            self.np_random.integers(len(self.card_pool))]
+                kw["deck"] = deck
+        else:
+            self._max_hp_now = float(self.max_hp)
+
         # Restoring HP every episode keeps the task stationary and stops the
         # player carrying damage between fights until the run dies (a death
         # ends the run and forces a costly engine restart).
         try:
-            self.state = self.engine.reset_combat(
-                encounter=enc, hp=self.start_hp, max_hp=self.max_hp)
-        except EngineError:
-            # Run over (death) or engine wedged: rebuild and retry once.
+            self.state = self.engine.reset_combat(encounter=enc, **kw)
+        except EngineError as exc:
+            # Run over (death) or engine wedged: rebuild and retry once. This
+            # costs ~0.9s, so it must not happen routinely — it is reported
+            # rather than swallowed, because a silent respawn loop looks like
+            # "training is mysteriously slow" and nothing else.
+            self._respawns += 1
+            print(f"[env] engine respawn #{self._respawns} after reset failure: "
+                  f"{str(exc)[:120]}", file=sys.stderr)
             self.engine.close()
             self.engine = None
             self._ensure_engine()
             assert self.engine is not None
-            self.state = self.engine.reset_combat(
-                encounter=enc, hp=self.start_hp, max_hp=self.max_hp)
+            self.state = self.engine.reset_combat(encounter=enc, **kw)
 
         self._steps = 0
         self._prev_player_hp = self._player_hp(self.state)

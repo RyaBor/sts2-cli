@@ -223,6 +223,10 @@ public class RunSimulator
 
     private RunState? _runState;
     private static bool _modelDbInitialized;
+    // The selector stack is static and outlives a run; registering twice
+    // throws "a card selector is already active", which blocked restarting
+    // a run in-process. The selector instance never changes, so register once.
+    private static bool _selectorRegistered;
     private static readonly InlineSynchronizationContext _syncCtx = new();
     private readonly ManualResetEventSlim _turnStarted = new(false);
     private readonly ManualResetEventSlim _combatEnded = new(false);
@@ -247,6 +251,29 @@ public class RunSimulator
         {
             _loc.Lang = lang;
             EnsureModelDbInitialized();
+
+            // Allow a second start_run in the same process. Without this the
+            // run manager refuses with "State is already set", so recovering
+            // from a death meant killing and respawning the whole engine
+            // (~0.9s) instead of ~100ms of in-process cleanup.
+            if (_runState != null)
+            {
+                try
+                {
+                    RunManager.Instance.CleanUp(graceful: false);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[WARN] CleanUp before restart: {ex.Message}");
+                }
+                _runState = null;
+                _pendingRewards = null;
+                _pendingCardReward = null;
+                _pendingBundles = null;
+                _pendingBundleTcs = null;
+                _rewardsProcessed = false;
+                _eventOptionChosen = false;
+            }
 
             var player = CreatePlayer(character);
             if (player == null)
@@ -291,7 +318,11 @@ public class RunSimulator
             Log("Entered Act 0");
 
             // Register card selector for cards that need player choice
-            CardSelectCmd.UseSelector(_cardSelector);
+            if (!_selectorRegistered)
+            {
+                CardSelectCmd.UseSelector(_cardSelector);
+                _selectorRegistered = true;
+            }
             LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
@@ -346,7 +377,14 @@ public class RunSimulator
                         var id = rEl.GetString();
                         if (id == null) continue;
                         var model = ModelDb.GetById<RelicModel>(new ModelId("RELIC", id));
-                        if (model != null) list.Add(model.ToMutable());
+                        if (model == null) continue;
+                        var mutable = model.ToMutable();
+                        // Owner must be set or combat start throws: relic hooks
+                        // dereference it when the fight begins. Assigned directly
+                        // rather than via RelicCmd.Obtain so that restoring a
+                        // saved loadout does not re-fire on-pickup effects.
+                        mutable.Owner = player;
+                        list.Add(mutable);
                     }
                 }
             }
@@ -534,7 +572,11 @@ public class RunSimulator
 
             CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
             CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
-            CardSelectCmd.UseSelector(_cardSelector);
+            if (!_selectorRegistered)
+            {
+                CardSelectCmd.UseSelector(_cardSelector);
+                _selectorRegistered = true;
+            }
             LocPatches._bundleSimRef = this;
 
             var savedRoom = _runState.CurrentRoom;
@@ -2269,6 +2311,7 @@ public class RunSimulator
                 // Enemy powers
                 var ePowers = e.Powers?.Select(pw => new Dictionary<string, object?>
                 {
+                    ["id"] = pw.Id.Entry,
                     ["name"] = _loc.Power(pw.Id.Entry),
                     ["description"] = _loc.Bilingual("powers", pw.Id.Entry + ".description"),
                     ["amount"] = pw.Amount,
@@ -2293,6 +2336,7 @@ public class RunSimulator
         // Player powers/buffs
         var playerPowers = player.Creature?.Powers?.Select(pw => new Dictionary<string, object?>
         {
+            ["id"] = pw.Id.Entry,
             ["name"] = _loc.Power(pw.Id.Entry),
             ["description"] = _loc.Bilingual("powers", pw.Id.Entry + ".description"),
             ["amount"] = pw.Amount,
@@ -2308,7 +2352,7 @@ public class RunSimulator
             ["max_energy"] = pcs?.MaxEnergy ?? 0,
             ["hand"] = hand,
             ["enemies"] = enemies,
-            ["player"] = PlayerSummary(player),
+            ["player"] = PlayerSummary(player, includeDeck: false),
             ["player_powers"] = playerPowers?.Count > 0 ? playerPowers : null,
             ["draw_pile_count"] = pcs?.DrawPile?.Cards?.Count ?? 0,
             ["discard_pile_count"] = pcs?.DiscardPile?.Cards?.Count ?? 0,
@@ -3008,7 +3052,12 @@ public class RunSimulator
         return ids;
     }
 
-    private Dictionary<string, object?> PlayerSummary(Player player)
+    /// <param name="includeDeck">
+    /// The full deck (with descriptions and upgrade previews) is ~70% of a
+    /// combat payload and never changes mid-fight, so combat states omit it.
+    /// During combat the deck is hand + draw + discard + exhaust anyway.
+    /// </param>
+    private Dictionary<string, object?> PlayerSummary(Player player, bool includeDeck = true)
     {
         return new Dictionary<string, object?>
         {
@@ -3047,7 +3096,7 @@ public class RunSimulator
                 };
             }).Where(x => x != null).ToList(),
             ["deck_size"] = player.Deck?.Cards?.Count(c => c != null) ?? 0,
-            ["deck"] = player.Deck?.Cards?.Where(c => c != null).Select(c =>
+            ["deck"] = !includeDeck ? null : player.Deck?.Cards?.Where(c => c != null).Select(c =>
             {
                 var dstats = new Dictionary<string, object?>();
                 try { foreach (var dv in c.DynamicVars.Values) dstats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
@@ -3092,6 +3141,10 @@ public class RunSimulator
             ["floor"] = _runState.ActFloor,
             ["room_type"] = _runState.CurrentRoom?.RoomType.ToString(),
         };
+
+        // Which fight this actually is — needed to replay a logged combat.
+        if (_runState.CurrentRoom is CombatRoom cr && cr.Encounter != null)
+            ctx["encounter"] = cr.Encounter.Id.Entry;
 
         // Boss encounter info — use BossEncounter?.Id?.Entry
         try

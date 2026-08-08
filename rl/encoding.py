@@ -25,6 +25,7 @@ MAX_INTENTS = 3
 MAX_RELICS = 16
 MAX_POTIONS = 5
 MAX_PILE = 40      # cards summarised per pile (draw / discard / exhaust)
+MAX_POWERS = 8     # buffs/debuffs tracked per creature
 
 # --- action layout ---
 #   [0, MAX_HAND*MAX_ENEMIES)       play card i targeting enemy j
@@ -56,6 +57,10 @@ def observation_space() -> spaces.Dict:
         "enemy_feats": spaces.Box(-10.0, 10.0, (MAX_ENEMIES, ENEMY_FEATS), dtype=f32),
         "enemy_intents": spaces.Box(0, 1e6, (MAX_ENEMIES, MAX_INTENTS), dtype=f32),
         "enemy_mask": spaces.Box(0.0, 1.0, (MAX_ENEMIES,), dtype=f32),
+        "enemy_power_ids": spaces.Box(0, 1e6, (MAX_ENEMIES, MAX_POWERS), dtype=f32),
+        "enemy_power_amts": spaces.Box(-10.0, 10.0, (MAX_ENEMIES, MAX_POWERS), dtype=f32),
+        "player_power_ids": spaces.Box(0, 1e6, (MAX_POWERS,), dtype=f32),
+        "player_power_amts": spaces.Box(-10.0, 10.0, (MAX_POWERS,), dtype=f32),
         "relic_ids": spaces.Box(0, 1e6, (MAX_RELICS,), dtype=f32),
         "potion_ids": spaces.Box(0, 1e6, (MAX_POTIONS,), dtype=f32),
         "draw_ids": spaces.Box(0, 1e6, (MAX_PILE,), dtype=f32),
@@ -80,6 +85,7 @@ def encode_obs(st: dict) -> dict[str, np.ndarray]:
     cv, mv, rv, pv, iv = (vocab.cards(), vocab.monsters(), vocab.relics(),
                           vocab.potions(), vocab.intents())
     ev = vocab.encounters()
+    wv = vocab.powers()
     p = st.get("player") or {}
     hp = float(p.get("hp") or 0)
     max_hp = float(p.get("max_hp") or 1)
@@ -120,6 +126,8 @@ def encode_obs(st: dict) -> dict[str, np.ndarray]:
     enemy_feats = np.zeros((MAX_ENEMIES, ENEMY_FEATS), dtype=np.float32)
     enemy_intents = np.zeros((MAX_ENEMIES, MAX_INTENTS), dtype=np.float32)
     enemy_mask = np.zeros(MAX_ENEMIES, dtype=np.float32)
+    enemy_power_ids = np.zeros((MAX_ENEMIES, MAX_POWERS), dtype=np.float32)
+    enemy_power_amts = np.zeros((MAX_ENEMIES, MAX_POWERS), dtype=np.float32)
     for i, e in enumerate(alive[:MAX_ENEMIES]):
         ehp = float(e.get("hp") or 0)
         emax = float(e.get("max_hp") or 1)
@@ -139,6 +147,15 @@ def encode_obs(st: dict) -> dict[str, np.ndarray]:
         f[7] = min(2.0, dmg / max(hp, 1.0))
         for j, x in enumerate(intents[:MAX_INTENTS]):
             enemy_intents[i, j] = iv.index(str(x.get("type") or ""))
+        for j, pw in enumerate((e.get("powers") or [])[:MAX_POWERS]):
+            enemy_power_ids[i, j] = wv.index(str(pw.get("id") or pw.get("name") or ""))
+            enemy_power_amts[i, j] = float(pw.get("amount") or 0) / 10.0
+
+    player_power_ids = np.zeros(MAX_POWERS, dtype=np.float32)
+    player_power_amts = np.zeros(MAX_POWERS, dtype=np.float32)
+    for i, pw in enumerate((st.get("player_powers") or [])[:MAX_POWERS]):
+        player_power_ids[i] = wv.index(str(pw.get("id") or pw.get("name") or ""))
+        player_power_amts[i] = float(pw.get("amount") or 0) / 10.0
 
     relic_ids = np.zeros(MAX_RELICS, dtype=np.float32)
     for i, r in enumerate((p.get("relics") or [])[:MAX_RELICS]):
@@ -160,6 +177,10 @@ def encode_obs(st: dict) -> dict[str, np.ndarray]:
         "enemy_feats": enemy_feats,
         "enemy_intents": enemy_intents,
         "enemy_mask": enemy_mask,
+        "enemy_power_ids": enemy_power_ids,
+        "enemy_power_amts": enemy_power_amts,
+        "player_power_ids": player_power_ids,
+        "player_power_amts": player_power_amts,
         "relic_ids": relic_ids,
         "potion_ids": potion_ids,
         "draw_ids": _pile_ids(st.get("draw_pile"), cv),

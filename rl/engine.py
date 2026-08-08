@@ -38,6 +38,8 @@ class Engine:
                 f"Engine not built: {dll}\nRun: dotnet build src/Sts2Headless/Sts2Headless.csproj")
         self.character = character
         self.ascension = ascension
+        self.seed = seed or "rl"
+        self._runs = 1
         self.proc = subprocess.Popen(
             ["dotnet", dll],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -93,10 +95,26 @@ class Engine:
 
     # ---------------- combat lifecycle ----------------
 
+    def restart_run(self) -> dict[str, Any]:
+        """Start a fresh run in this process.
+
+        Model registration is cached after the first run, so this is far
+        cheaper than tearing down the process and spawning a new engine.
+        """
+        st = self.send({"cmd": "start_run", "character": self.character,
+                        "seed": f"{self.seed}_r{self._runs}", "ascension": self.ascension})
+        self._runs += 1
+        if st.get("type") == "error":
+            raise EngineError(f"restart_run failed: {st.get('message')}")
+        return st
+
     def reset_combat(self, encounter: str | None = None, hp: int | None = None,
                      max_hp: int | None = None, deck: list[str] | None = None,
                      relics: list[str] | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight."""
+        # A death ends the run, and a finished run silently refuses enter_room.
+        if (self.last or {}).get("decision") == "game_over":
+            self.restart_run()
         st = self._clear_to_neutral()
 
         loadout: dict[str, Any] = {"cmd": "set_player"}
@@ -119,8 +137,36 @@ class Engine:
         st = self.send(room)
         if st.get("type") == "error":
             raise EngineError(f"enter_room failed: {st.get('message')}")
+
+        # Some loadouts open a selection screen before the first turn (relics and
+        # cards with "at combat start, choose ..." effects). Resolve those rather
+        # than treating them as an error — raising here made the env throw away
+        # the engine and spawn a new one, which is ~0.9s and silently dropped the
+        # loadout we were trying to test.
+        for _ in range(6):
+            dec = st.get("decision")
+            if dec == "combat_play":
+                return st
+            if dec == "card_select":
+                cards = st.get("cards") or []
+                st = (self.act("select_cards", indices="0") if cards
+                      else self.act("skip_select"))
+            elif dec == "bundle_select":
+                st = self.act("select_bundle", bundle_index=0)
+            else:
+                break
+            if st.get("type") == "error":
+                raise EngineError(f"combat-start selection failed: {st.get('message')}")
+
         if st.get("decision") != "combat_play":
-            raise EngineError(f"expected combat_play, got {st.get('decision')}")
+            # Usually means the run is no longer accepting rooms. One in-process
+            # restart is ~100ms; letting this bubble up costs a process respawn.
+            self.restart_run()
+            if len(loadout) > 1:
+                self.send(loadout)
+            st = self.send(room)
+            if st.get("decision") != "combat_play":
+                raise EngineError(f"expected combat_play, got {st.get('decision')}")
         return st
 
     def _clear_to_neutral(self, max_steps: int = 8) -> dict[str, Any] | None:
