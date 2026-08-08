@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -122,6 +123,29 @@ def main() -> None:
             device=args.device,
             verbose=1,
         )
+
+    # Run config, so the dashboard can show progress and ETA (the event files
+    # record steps taken but never the target) and so a run's settings stay
+    # recoverable after the fact.
+    meta_dir = os.path.join(run_dir, "meta")
+    os.makedirs(meta_dir, exist_ok=True)
+    with open(os.path.join(meta_dir, f"{args.name}.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "name": args.name,
+            "target_steps": args.steps,
+            "envs": args.envs,
+            "character": args.character,
+            "encounter": args.encounter,
+            "ascension": args.ascension,
+            "deck_noise": args.deck_noise,
+            "snapshots": os.path.basename(args.snapshots) if args.snapshots else None,
+            "n_snapshots": len(snapshots) if snapshots else 0,
+            "lr": args.lr, "n_steps": args.n_steps, "batch_size": args.batch_size,
+            "ent_coef": args.ent_coef,
+            "rewards": {**DEFAULT_REWARDS, **rewards},
+            "resumed_from": args.resume,
+            "started": time.time(),
+        }, f, indent=1)
 
     ckpt = CheckpointCallback(
         save_freq=max(20_000 // args.envs, 1),

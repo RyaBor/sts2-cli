@@ -79,6 +79,7 @@ class Sts2CombatEnv(gym.Env):
         self._steps = 0
         self._prev_player_hp = 0.0
         self._prev_enemy_hp = 0.0
+        self._consecutive_invalid = 0
 
     # ---------------- helpers ----------------
 
@@ -151,6 +152,7 @@ class Sts2CombatEnv(gym.Env):
             self.state = self.engine.reset_combat(encounter=enc, **kw)
 
         self._steps = 0
+        self._consecutive_invalid = 0
         self._prev_player_hp = self._player_hp(self.state)
         self._prev_enemy_hp = self._enemy_hp_total(self.state)
         return self._obs(), {}
@@ -169,7 +171,16 @@ class Sts2CombatEnv(gym.Env):
 
         if nxt.get("type") == "error":
             # Illegal action slipped through the mask: penalise lightly, keep state.
+            # Keeping the state means a wedged combat where *every* action is
+            # rejected would spin here until max_steps, burning samples and
+            # inflating the invalid count in bursts. Bail out instead.
+            self._consecutive_invalid += 1
+            if self._consecutive_invalid >= 8:
+                return (self._obs(), self.r["loss"], True, False,
+                        {"invalid": nxt.get("message"), "outcome": "stuck",
+                         "final_hp": self._player_hp(self.state)})
             return self._obs(), -0.05, False, False, {"invalid": nxt.get("message")}
+        self._consecutive_invalid = 0
 
         decision = nxt.get("decision")
         reward = self.r["step"]

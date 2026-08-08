@@ -73,16 +73,45 @@ def _load_run(path: str) -> dict:
     return data
 
 
+def _meta_for(run_name: str) -> dict:
+    """Config written by train.py. Run dirs are '<name>_<n>', metadata is
+    keyed by the bare name, so strip the TensorBoard suffix."""
+    base = run_name.rsplit("_", 1)[0] if run_name.rsplit("_", 1)[-1].isdigit() else run_name
+    path = os.path.join(RUNS, "meta", f"{base}.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def collect_runs() -> list[dict]:
     if not os.path.isdir(RUNS):
         return []
     out = []
     for entry in sorted(os.listdir(RUNS)):
         p = os.path.join(RUNS, entry)
-        if os.path.isdir(p):
-            d = _load_run(p)
-            if d:
-                out.append(d)
+        if not os.path.isdir(p) or entry == "meta":
+            continue
+        d = _load_run(p)
+        if not d:
+            continue
+        d["meta"] = _meta_for(entry)
+
+        target = d["meta"].get("target_steps")
+        d["target"] = target
+        d["progress"] = min(1.0, d["steps"] / target) if target else None
+        # ETA from recent throughput rather than the run average, so a run that
+        # sped up or slowed down reports what it is doing now.
+        fps = d["series"].get("time/fps", {}).get("y") or []
+        recent = fps[-8:]
+        rate = sum(recent) / len(recent) if recent else 0
+        d["fps_now"] = rate
+        d["eta"] = ((target - d["steps"]) / rate) if (target and rate > 0
+                                                      and d["steps"] < target) else None
+        out.append(d)
     out.sort(key=lambda r: (not r["live"], -r["updated"]))
     return out
 
@@ -183,11 +212,22 @@ PAGE = r"""<!doctype html>
     box-shadow:0 4px 14px rgba(0,0,0,.14);z-index:9;color:var(--text-primary)}
   .tip .k{color:var(--text-secondary)}
   h3{font-size:14px;margin:26px 0 8px}
+  .prog{display:grid;grid-template-columns:1fr;gap:9px;margin-bottom:20px}
+  .prow{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:12px 15px}
+  .ptop{display:flex;align-items:center;gap:9px;font-size:13.5px;margin-bottom:8px;flex-wrap:wrap}
+  .ptop .nm{font-weight:600}
+  .ptop .cfg{color:var(--muted);font-size:12px}
+  .ptop .right{margin-left:auto;color:var(--text-secondary);font-size:12.5px;font-variant-numeric:tabular-nums}
+  .bar{height:7px;border-radius:4px;background:var(--grid);overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:4px;transition:width .6s ease}
+  .bar.indet i{width:35%;animation:slide 1.7s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
 </style></head><body>
 <div class="wrap">
   <header><h1>Slay the Spire 2 — live training</h1><span id="clock" class="sub"></span></header>
   <p class="sub" id="sub">connecting…</p>
   <div class="runs" id="runs"></div>
+  <div class="prog" id="prog"></div>
   <div class="tiles" id="tiles"></div>
   <div class="grid" id="charts"></div>
   <h3>Runs</h3><div class="card"><table id="runtable"></table></div>
@@ -225,6 +265,34 @@ function drawChips(){
     d.onclick=()=>{hidden.has(r.name)?hidden.delete(r.name):hidden.add(r.name);render();};
     el.appendChild(d);
   });
+}
+
+function drawProgress(){
+  const el=document.getElementById('prog'); el.innerHTML='';
+  for(const r of visible()){
+    const c=colorOf[r.name], m=r.meta||{};
+    const pct=r.progress==null?null:r.progress*100;
+    const cfg=[m.envs?m.envs+' envs':null,
+               m.n_snapshots?m.n_snapshots+' snapshots':null,
+               m.deck_noise?Math.round(m.deck_noise*100)+'% deck noise':null,
+               m.encounter&&m.encounter!=='default'
+                 ? (m.encounter.split(',').length+' encounters') : null].filter(Boolean).join(' · ');
+    const right = r.live
+      ? (pct!=null?`${pct.toFixed(1)}% · ${short(r.steps)}/${short(r.target)}`:short(r.steps))
+        + (r.eta?` · ~${ago(r.eta)} left`:'') + (r.fps_now?` · ${Math.round(r.fps_now)} fps`:'')
+      : (pct!=null&&pct>=99.5?'complete':`stopped at ${short(r.steps)}`
+         +(pct!=null?` (${pct.toFixed(0)}%)`:''));
+    const d=document.createElement('div'); d.className='prow';
+    d.innerHTML=`<div class="ptop"><span class="sw" style="background:${c}"></span>`+
+      `<span class="nm">${r.name}</span><span class="cfg">${cfg}</span>`+
+      `<span class="right">${right}</span></div>`+
+      // No target recorded (runs started before metadata existed): show motion,
+      // not a fake percentage.
+      (pct==null && r.live
+        ? `<div class="bar indet"><i style="background:${c}"></i></div>`
+        : `<div class="bar"><i style="width:${Math.max(1,pct||0)}%;background:${c};${r.live?'':'opacity:.5'}"></i></div>`);
+    el.appendChild(d);
+  }
 }
 
 function drawTiles(){
@@ -309,7 +377,7 @@ function drawTables(){
 }
 
 function render(){
-  drawChips(); drawTiles();
+  drawChips(); drawProgress(); drawTiles();
   const el=document.getElementById('charts'); el.innerHTML='';
   for(const p of DATA.panels){const c=chart(p); if(c)el.appendChild(c);}
   drawTables();
