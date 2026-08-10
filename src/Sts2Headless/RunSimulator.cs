@@ -356,15 +356,37 @@ public class RunSimulator
                 foreach (var c in player.Deck.Cards.ToList())
                     _runState.RemoveCard(c);
                 player.Deck.Clear(silent: true);
-                // Add new cards via RunState.CreateCard (sets Owner + registers)
+                // Add new cards via RunState.CreateCard (sets Owner + registers).
+                // Each element is either a bare card id string ("STRIKE_IRONCLAD")
+                // or an object {"id": "...", "upgrade": N} carrying an upgrade
+                // level. Upgrades are applied with the same UpgradeInternal +
+                // FinalizeUpgradeInternal pattern used by GetUpgradedInfo, so an
+                // upgraded card in the live deck is simulated as upgraded (#3).
                 foreach (var cEl in deckEl.EnumerateArray())
                 {
-                    var id = cEl.GetString();
+                    string? id;
+                    int upgrade = 0;
+                    if (cEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        id = cEl.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+                        if (cEl.TryGetProperty("upgrade", out var upEl)
+                            && upEl.ValueKind == System.Text.Json.JsonValueKind.Number)
+                            upgrade = upEl.GetInt32();
+                    }
+                    else
+                    {
+                        id = cEl.GetString();
+                    }
                     if (id == null) continue;
                     var canonical = ModelDb.GetById<CardModel>(new ModelId("CARD", id));
                     if (canonical != null)
                     {
                         var card = _runState.CreateCard(canonical, player);
+                        for (int u = 0; u < upgrade && card.IsUpgradable; u++)
+                        {
+                            card.UpgradeInternal();
+                            card.FinalizeUpgradeInternal();
+                        }
                         player.Deck.AddInternal(card, silent: true);
                     }
                 }
