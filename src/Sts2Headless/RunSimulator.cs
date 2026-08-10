@@ -321,6 +321,47 @@ public class RunSimulator
         field?.SetValue(obj, value);
     }
 
+    /// <summary>
+    /// Re-attach an out-of-combat enchantment to a reconstructed card. The
+    /// enchantment is a ModelDb entry (ADROIT, SHARP, MOMENTUM, ...); we look it
+    /// up by id, then set it onto the card via the public Enchantment setter if
+    /// one exists, else the private backing field. Amount is applied when the
+    /// model exposes a settable Amount. Logs (does not throw) if it can't attach,
+    /// so a missing setter is diagnosable rather than silently dropped.
+    /// </summary>
+    private void ApplyEnchantment(CardModel card, string enchantId, int amount)
+    {
+        try
+        {
+            var model = ModelDb.GetById<EnchantmentModel>(new ModelId("ENCHANTMENT", enchantId));
+            if (model == null)
+            {
+                Log($"ApplyEnchantment: unknown enchantment id '{enchantId}'");
+                return;
+            }
+            var mutable = model.ToMutable();
+            if (amount != 0)
+            {
+                var amtProp = mutable.GetType().GetProperty("Amount");
+                if (amtProp != null && amtProp.CanWrite) amtProp.SetValue(mutable, amount);
+                else SetField(mutable, "_amount", amount);
+            }
+            var prop = card.GetType().GetProperty("Enchantment");
+            if (prop != null && prop.CanWrite)
+                prop.SetValue(card, mutable);
+            else
+                SetField(card, "_enchantment", mutable);
+
+            if (card.Enchantment == null)
+                Log($"ApplyEnchantment: failed to attach '{enchantId}' to {card.Id.Entry} " +
+                    $"(no public setter and '_enchantment' backing field not found)");
+        }
+        catch (Exception ex)
+        {
+            Log($"ApplyEnchantment('{enchantId}'): {ex.Message}");
+        }
+    }
+
     public Dictionary<string, object?> SetPlayer(Dictionary<string, System.Text.Json.JsonElement> args)
     {
         try
@@ -366,12 +407,19 @@ public class RunSimulator
                 {
                     string? id;
                     int upgrade = 0;
+                    string? enchantId = null;
+                    int enchantAmount = 0;
                     if (cEl.ValueKind == System.Text.Json.JsonValueKind.Object)
                     {
                         id = cEl.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
                         if (cEl.TryGetProperty("upgrade", out var upEl)
                             && upEl.ValueKind == System.Text.Json.JsonValueKind.Number)
                             upgrade = upEl.GetInt32();
+                        if (cEl.TryGetProperty("enchantment", out var enEl))
+                            enchantId = enEl.GetString();
+                        if (cEl.TryGetProperty("enchantment_amount", out var enAmtEl)
+                            && enAmtEl.ValueKind == System.Text.Json.JsonValueKind.Number)
+                            enchantAmount = enAmtEl.GetInt32();
                     }
                     else
                     {
@@ -387,6 +435,11 @@ public class RunSimulator
                             card.UpgradeInternal();
                             card.FinalizeUpgradeInternal();
                         }
+                        // Re-attach an enchantment applied out of combat. The live
+                        // card already carried it; we look up the enchantment model
+                        // by id and set it back onto the reconstructed card.
+                        if (enchantId != null)
+                            ApplyEnchantment(card, enchantId, enchantAmount);
                         player.Deck.AddInternal(card, silent: true);
                     }
                 }
