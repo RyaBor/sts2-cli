@@ -95,7 +95,8 @@ class Engine:
 
     def reset_combat(self, encounter: str | None = None, hp: int | None = None,
                      max_hp: int | None = None, deck: list[str] | None = None,
-                     relics: list[str] | None = None) -> dict[str, Any]:
+                     relics: list[str] | None = None,
+                     potions: list[str] | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight."""
         st = self._clear_to_neutral()
 
@@ -108,6 +109,8 @@ class Engine:
             loadout["deck"] = deck
         if relics is not None:
             loadout["relics"] = relics
+        if potions is not None:
+            loadout["potions"] = potions
         if len(loadout) > 1:
             r = self.send(loadout)
             if r.get("type") == "error":

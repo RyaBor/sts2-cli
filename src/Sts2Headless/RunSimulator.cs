@@ -3080,10 +3080,13 @@ public class RunSimulator
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
+                    ["id"] = p.Id.Entry,
                     ["name"] = _loc.Potion(p.Id.Entry),
                     ["description"] = _loc.Bilingual("potions", p.Id.Entry + ".description"),
                     ["vars"] = pvars.Count > 0 ? pvars : null,
                     ["target_type"] = p.TargetType.ToString(),
+                    ["can_use_in_combat"] = p.Usage == PotionUsage.CombatOnly
+                                            || p.Usage == PotionUsage.AnyTime,
                 };
             }).Where(x => x != null).ToList(),
             ["deck_size"] = player.Deck?.Cards?.Count(c => c != null) ?? 0,
