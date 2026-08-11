@@ -379,17 +379,23 @@ public class RunSimulator
 
             if (args.TryGetValue("relics", out var relicsEl))
             {
+                // Clear existing relics, then add each via AddRelicInternal with
+                // Owner set. Poking the _relics backing list directly (the old
+                // approach) left the relic unregistered with the RunState, so
+                // Hook.BeforeRoomEntered -> RunState.IterateHookListeners ->
+                // RunState.Contains(relic) NRE'd on enter_room. Relics are hook
+                // listeners; they must be registered like the deck's cards are.
                 var list = GetBackingList<RelicModel>(player, "_relics");
-                if (list != null)
+                if (list != null) list.Clear();
+                foreach (var rEl in relicsEl.EnumerateArray())
                 {
-                    list.Clear();
-                    foreach (var rEl in relicsEl.EnumerateArray())
-                    {
-                        var id = rEl.GetString();
-                        if (id == null) continue;
-                        var model = ModelDb.GetById<RelicModel>(new ModelId("RELIC", id));
-                        if (model != null) list.Add(model.ToMutable());
-                    }
+                    var id = rEl.GetString();
+                    if (id == null) continue;
+                    var model = ModelDb.GetById<RelicModel>(new ModelId("RELIC", id));
+                    if (model == null) continue;
+                    var copy = (RelicModel)model.ToMutable();
+                    copy.FloorAddedToDeck = 1;
+                    player.AddRelicInternal(copy, silent: true);
                 }
             }
             if (args.TryGetValue("deck", out var deckEl))
