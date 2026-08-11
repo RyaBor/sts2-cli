@@ -114,14 +114,16 @@ class Engine:
         if len(loadout) > 1:
             r = self.send(loadout)
             if r.get("type") == "error":
-                raise EngineError(f"set_player failed: {r.get('message')}")
+                raise EngineError(f"set_player failed: {r.get('message')}\n"
+                                  f"{r.get('stack_trace', '')}")
 
         room: dict[str, Any] = {"cmd": "enter_room", "type": "combat"}
         if encounter:
             room["encounter"] = encounter
         st = self.send(room)
         if st.get("type") == "error":
-            raise EngineError(f"enter_room failed: {st.get('message')}")
+            raise EngineError(f"enter_room failed: {st.get('message')}\n"
+                              f"{st.get('stack_trace', '')}")
         if st.get("decision") != "combat_play":
             raise EngineError(f"expected combat_play, got {st.get('decision')}")
         return st
