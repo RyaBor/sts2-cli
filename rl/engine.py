@@ -101,7 +101,9 @@ class Engine:
                      discard: list[str] | None = None,
                      exhaust: list[str] | None = None,
                      enemy_hp: list[int] | None = None,
-                     enemy_block: list[int] | None = None) -> dict[str, Any]:
+                     enemy_block: list[int] | None = None,
+                     player_powers: list[dict] | None = None,
+                     enemy_powers: list[list] | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight.
 
         If `hand` (and optionally `discard`/`exhaust`) is given, after entering
@@ -166,6 +168,19 @@ class Engine:
                                   f"{e.get('stack_trace', '')}")
             if e.get("decision") == "combat_play":
                 st = e
+
+        # Apply powers (Frail/Weak/Strength/Vulnerable/...) to player + enemies,
+        # else the sim ignores them and mis-simulates block/damage.
+        if player_powers is not None or enemy_powers is not None:
+            cmd = {"cmd": "set_powers",
+                   "player": player_powers or [],
+                   "enemies": enemy_powers or []}
+            p = self.send(cmd)
+            if p.get("type") == "error":
+                raise EngineError(f"set_powers failed: {p.get('message')}\n"
+                                  f"{p.get('stack_trace', '')}")
+            if p.get("decision") == "combat_play":
+                st = p
         return st
 
     def _clear_to_neutral(self, max_steps: int = 8) -> dict[str, Any] | None:

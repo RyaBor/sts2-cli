@@ -699,6 +699,88 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetEnemies failed", ex); }
     }
 
+    // Apply powers to the player and enemies to match the live fight. Without
+    // this the reconstruction has zero powers, so Frail/Weak/Strength/Vulnerable
+    // etc. are ignored (e.g. Frail-reduced Defend blocks full, mis-scoring block).
+    // `playerPowers` and `enemyPowers[i]` are lists of (id, amount). Powers are
+    // applied via PowerCmd.Apply(model, target, amount, source) — invoked by
+    // reflection to tolerate signature differences across builds; failures are
+    // logged per-power, not fatal.
+    public Dictionary<string, object?> SetPowers(
+        List<(string id, int amount)> playerPowers,
+        List<List<(string id, int amount)>> enemyPowers)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players[0];
+            var state = CombatManager.Instance.DebugOnlyGetState();
+            if (state == null) return Error("Not in combat");
+            var enemies = state.Enemies.Where(e => e != null).ToList();
+            var source = player.Creature;
+
+            int applied = 0, failed = 0;
+            void ApplyAll(List<(string id, int amount)> powers, object target)
+            {
+                foreach (var (id, amount) in powers)
+                {
+                    if (ApplyPowerById(id, target, amount, source)) applied++;
+                    else { failed++; Log($"SetPowers: could not apply '{id}'"); }
+                }
+            }
+
+            ApplyAll(playerPowers, player.Creature);
+            for (int i = 0; i < enemyPowers.Count && i < enemies.Count; i++)
+                ApplyAll(enemyPowers[i], enemies[i]);
+
+            Log($"SetPowers: {applied} applied, {failed} failed");
+            var decision = DetectDecisionPoint();
+            if (decision != null) decision["set_powers_failed"] = failed;
+            return decision ?? new Dictionary<string, object?> { ["type"] = "ok" };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetPowers failed", ex); }
+    }
+
+    // Look up a PowerModel by id and apply it via PowerCmd.Apply, invoked by
+    // reflection so we don't hard-depend on one signature. Tries the common
+    // (target, amount, source, extra) arg shapes. Returns false if nothing worked.
+    private bool ApplyPowerById(string id, object target, int amount, object source)
+    {
+        try
+        {
+            var model = ModelDb.GetById<PowerModel>(new ModelId("POWER", id));
+            if (model == null) return false;
+            var mutable = model.ToMutable();
+
+            var applyMethods = typeof(PowerCmd).GetMethods(
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                .Where(m => m.Name == "Apply" && !m.IsGenericMethod).ToList();
+            foreach (var m in applyMethods)
+            {
+                var ps = m.GetParameters();
+                object?[]? args = null;
+                // Common shape: Apply(PowerModel, Creature target, decimal amount, Creature source, ...)
+                if (ps.Length >= 3 && typeof(PowerModel).IsAssignableFrom(ps[0].ParameterType))
+                {
+                    args = new object?[ps.Length];
+                    args[0] = mutable;
+                    args[1] = target;
+                    if (ps.Length >= 3) args[2] = System.Convert.ChangeType(amount, ps[2].ParameterType);
+                    for (int i = 3; i < ps.Length; i++)
+                        args[i] = ps[i].ParameterType == source.GetType()
+                            || ps[i].ParameterType.IsInstanceOfType(source) ? source
+                            : (ps[i].HasDefaultValue ? ps[i].DefaultValue : null);
+                }
+                if (args == null) continue;
+                var res = m.Invoke(null, args);
+                if (res is System.Threading.Tasks.Task t) t.GetAwaiter().GetResult();
+                return true;
+            }
+        }
+        catch (Exception ex) { Log($"ApplyPowerById('{id}'): {ex.Message}"); }
+        return false;
+    }
+
     // ─── Game actions ───
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
     {

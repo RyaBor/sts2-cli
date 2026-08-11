@@ -225,6 +225,30 @@ class Program
                 return sim.SetEnemies(hps, blocks);
             }
 
+            case "set_powers":
+            {
+                static List<(string, int)> ParsePowers(System.Text.Json.JsonElement arr)
+                {
+                    var list = new List<(string, int)>();
+                    foreach (var p in arr.EnumerateArray())
+                    {
+                        var id = p.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+                        var amt = p.TryGetProperty("amount", out var aEl)
+                            && aEl.ValueKind == System.Text.Json.JsonValueKind.Number
+                            ? aEl.GetInt32() : 0;
+                        if (id != null) list.Add((id, amt));
+                    }
+                    return list;
+                }
+                var playerPowers = cmd.TryGetProperty("player", out var pArr)
+                    ? ParsePowers(pArr) : new List<(string, int)>();
+                var enemyPowers = new List<List<(string, int)>>();
+                if (cmd.TryGetProperty("enemies", out var eArr))
+                    foreach (var e in eArr.EnumerateArray())
+                        enemyPowers.Add(ParsePowers(e));
+                return sim.SetPowers(playerPowers, enemyPowers);
+            }
+
             case "write_continue_save":
             {
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;
