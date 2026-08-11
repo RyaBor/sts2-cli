@@ -699,6 +699,74 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetEnemies failed", ex); }
     }
 
+    // Restore RNG stream state (seed + position per stream) so draw order and
+    // card creation replay deterministically to the live run instead of the
+    // fresh enter_room shuffle. `runRngs`/`playerRngs` map rng-type name ->
+    // (seed, position). Applied reflectively onto RunState.Rngs / Player.Rngs so
+    // we don't hardcode RngType enum values. Streams not present are left as-is.
+    public Dictionary<string, object?> SetRng(
+        Dictionary<string, (long seed, long position)> runRngs,
+        Dictionary<string, (long seed, long position)> playerRngs)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            int applied = 0, failed = 0;
+            applied += RestoreRngs(_runState, runRngs, ref failed);
+            var player = _runState.Players != null && _runState.Players.Count > 0
+                ? _runState.Players[0] : null;
+            if (player != null) applied += RestoreRngs(player, playerRngs, ref failed);
+
+            Log($"SetRng: {applied} streams restored, {failed} failed");
+            var decision = DetectDecisionPoint();
+            if (decision != null) decision["set_rng_failed"] = failed;
+            return decision ?? new Dictionary<string, object?> { ["type"] = "ok" };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetRng failed", ex); }
+    }
+
+    private int RestoreRngs(object owner,
+        Dictionary<string, (long seed, long position)> streams, ref int failed)
+    {
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Instance;
+        int applied = 0;
+        try
+        {
+            var dict = owner.GetType().GetProperty("Rngs", F)?.GetValue(owner)
+                       as System.Collections.IDictionary;
+            if (dict == null) return 0;
+            // Map string key -> the live SerializableRng, matching by key.ToString().
+            var byName = new Dictionary<string, object>();
+            foreach (System.Collections.DictionaryEntry kv in dict)
+                if (kv.Value != null) byName[kv.Key?.ToString() ?? "?"] = kv.Value;
+
+            foreach (var (name, sp) in streams)
+            {
+                if (!byName.TryGetValue(name, out var rng)) { failed++; continue; }
+                var t = rng.GetType();
+                var seedProp = t.GetProperty("Seed", F);
+                var posProp = t.GetProperty("Position", F);
+                try
+                {
+                    if (seedProp != null && seedProp.CanWrite)
+                        seedProp.SetValue(rng, System.Convert.ChangeType(sp.seed, seedProp.PropertyType));
+                    else SetField(rng, "_seed", System.Convert.ChangeType(sp.seed,
+                        t.GetField("_seed", F)?.FieldType ?? typeof(long)));
+                    if (posProp != null && posProp.CanWrite)
+                        posProp.SetValue(rng, System.Convert.ChangeType(sp.position, posProp.PropertyType));
+                    else SetField(rng, "_position", System.Convert.ChangeType(sp.position,
+                        t.GetField("_position", F)?.FieldType ?? typeof(long)));
+                    applied++;
+                }
+                catch { failed++; }
+            }
+        }
+        catch { }
+        return applied;
+    }
+
     // Apply powers to the player and enemies to match the live fight. Without
     // this the reconstruction has zero powers, so Frail/Weak/Strength/Vulnerable
     // etc. are ignored (e.g. Frail-reduced Defend blocks full, mis-scoring block).

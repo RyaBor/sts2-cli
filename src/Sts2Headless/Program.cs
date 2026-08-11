@@ -249,6 +249,30 @@ class Program
                 return sim.SetPowers(playerPowers, enemyPowers);
             }
 
+            case "set_rng":
+            {
+                static Dictionary<string, (long, long)> ParseRngs(System.Text.Json.JsonElement obj)
+                {
+                    var d = new Dictionary<string, (long, long)>();
+                    foreach (var kv in obj.EnumerateObject())
+                    {
+                        long seed = kv.Value.TryGetProperty("seed", out var s)
+                            && s.ValueKind == System.Text.Json.JsonValueKind.Number ? s.GetInt64() : 0;
+                        long pos = kv.Value.TryGetProperty("position", out var p)
+                            && p.ValueKind == System.Text.Json.JsonValueKind.Number ? p.GetInt64() : 0;
+                        d[kv.Name] = (seed, pos);
+                    }
+                    return d;
+                }
+                var runRngs = cmd.TryGetProperty("run", out var rObj)
+                    && rObj.ValueKind == System.Text.Json.JsonValueKind.Object
+                    ? ParseRngs(rObj) : new Dictionary<string, (long, long)>();
+                var playerRngs = cmd.TryGetProperty("player", out var plObj)
+                    && plObj.ValueKind == System.Text.Json.JsonValueKind.Object
+                    ? ParseRngs(plObj) : new Dictionary<string, (long, long)>();
+                return sim.SetRng(runRngs, playerRngs);
+            }
+
             case "write_continue_save":
             {
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;

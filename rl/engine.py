@@ -103,7 +103,8 @@ class Engine:
                      enemy_hp: list[int] | None = None,
                      enemy_block: list[int] | None = None,
                      player_powers: list[dict] | None = None,
-                     enemy_powers: list[list] | None = None) -> dict[str, Any]:
+                     enemy_powers: list[list] | None = None,
+                     rng_streams: dict | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight.
 
         If `hand` (and optionally `discard`/`exhaust`) is given, after entering
@@ -181,6 +182,19 @@ class Engine:
                                   f"{p.get('stack_trace', '')}")
             if p.get("decision") == "combat_play":
                 st = p
+
+        # Restore RNG stream state so draw order + card creation replay
+        # deterministically to the live run (else the sim reshuffles).
+        if rng_streams:
+            cmd = {"cmd": "set_rng",
+                   "run": rng_streams.get("run") or {},
+                   "player": rng_streams.get("player") or {}}
+            g = self.send(cmd)
+            if g.get("type") == "error":
+                raise EngineError(f"set_rng failed: {g.get('message')}\n"
+                                  f"{g.get('stack_trace', '')}")
+            if g.get("decision") == "combat_play":
+                st = g
         return st
 
     def _clear_to_neutral(self, max_steps: int = 8) -> dict[str, Any] | None:
