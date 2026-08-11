@@ -139,6 +139,11 @@ class Engine:
         if st.get("type") == "error":
             raise EngineError(f"enter_room failed: {st.get('message')}\n"
                               f"{st.get('stack_trace', '')}")
+        # A start-of-combat effect (relic / start-of-turn power) can open a
+        # card_select before the first play. The live fight already resolved it,
+        # so auto-resolve here (pick the first min_select cards) to reach the
+        # combat_play position; set_hand below overrides the hand regardless.
+        st = self._resolve_pre_combat_selects(st)
         if st.get("decision") != "combat_play":
             raise EngineError(f"expected combat_play, got {st.get('decision')}")
 
@@ -195,6 +200,28 @@ class Engine:
                                   f"{g.get('stack_trace', '')}")
             if g.get("decision") == "combat_play":
                 st = g
+        return st
+
+    def _resolve_pre_combat_selects(self, st: dict[str, Any],
+                                    max_steps: int = 6) -> dict[str, Any]:
+        """Auto-resolve card_select prompts that appear before the first play.
+
+        Picks the first `min_select` offered cards (min_select 0 => confirm with
+        an empty selection). Bounded so a misbehaving prompt can't loop forever.
+        """
+        for _ in range(max_steps):
+            if st.get("decision") != "card_select":
+                return st
+            cards = st.get("cards") or []
+            need = int(st.get("min_select", 1) or 0)
+            need = max(0, min(need, len(cards)))
+            indices = ",".join(str(i) for i in range(need))
+            nxt = self.act("select_cards", indices=indices)
+            if nxt.get("type") == "error":
+                raise EngineError(
+                    f"resolving pre-combat card_select failed: "
+                    f"{nxt.get('message')}\n{nxt.get('stack_trace', '')}")
+            st = nxt
         return st
 
     def _clear_to_neutral(self, max_steps: int = 8) -> dict[str, Any] | None:
