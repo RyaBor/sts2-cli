@@ -257,27 +257,38 @@ class Program
                 return sim.SetPowers(playerPowers, enemyPowers);
             }
 
+            case "debug_members":
+                return sim.DebugMembers();
+
+            case "get_rng":
+                return sim.GetRng();
+
             case "set_rng":
             {
-                static Dictionary<string, (long, long)> ParseRngs(System.Text.Json.JsonElement obj)
+                static ulong U(System.Text.Json.JsonElement o, string k)
                 {
-                    var d = new Dictionary<string, (long, long)>();
-                    foreach (var kv in obj.EnumerateObject())
+                    if (o.TryGetProperty(k, out var v)
+                        && v.ValueKind == System.Text.Json.JsonValueKind.Number)
                     {
-                        long seed = kv.Value.TryGetProperty("seed", out var s)
-                            && s.ValueKind == System.Text.Json.JsonValueKind.Number ? s.GetInt64() : 0;
-                        long pos = kv.Value.TryGetProperty("position", out var p)
-                            && p.ValueKind == System.Text.Json.JsonValueKind.Number ? p.GetInt64() : 0;
-                        d[kv.Name] = (seed, pos);
+                        try { return v.GetUInt64(); }
+                        catch { try { return (ulong)v.GetInt64(); } catch { return 0UL; } }
                     }
+                    return 0UL;
+                }
+                static Dictionary<string, ulong[]> ParseRngs(System.Text.Json.JsonElement obj)
+                {
+                    var d = new Dictionary<string, ulong[]>();
+                    foreach (var kv in obj.EnumerateObject())
+                        d[kv.Name] = new[] { U(kv.Value, "s0"), U(kv.Value, "s1"),
+                            U(kv.Value, "s2"), U(kv.Value, "s3"), U(kv.Value, "counter") };
                     return d;
                 }
                 var runRngs = cmd.TryGetProperty("run", out var rObj)
                     && rObj.ValueKind == System.Text.Json.JsonValueKind.Object
-                    ? ParseRngs(rObj) : new Dictionary<string, (long, long)>();
+                    ? ParseRngs(rObj) : new Dictionary<string, ulong[]>();
                 var playerRngs = cmd.TryGetProperty("player", out var plObj)
                     && plObj.ValueKind == System.Text.Json.JsonValueKind.Object
-                    ? ParseRngs(plObj) : new Dictionary<string, (long, long)>();
+                    ? ParseRngs(plObj) : new Dictionary<string, ulong[]>();
                 return sim.SetRng(runRngs, playerRngs);
             }
 

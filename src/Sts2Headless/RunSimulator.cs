@@ -724,24 +724,141 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetEnergy failed", ex); }
     }
 
-    // Restore RNG stream state (seed + position per stream) so draw order and
-    // card creation replay deterministically to the live run instead of the
-    // fresh enter_room shuffle. `runRngs`/`playerRngs` map rng-type name ->
-    // (seed, position). Applied reflectively onto RunState.Rngs / Player.Rngs so
-    // we don't hardcode RngType enum values. Streams not present are left as-is.
-    public Dictionary<string, object?> SetRng(
-        Dictionary<string, (long seed, long position)> runRngs,
-        Dictionary<string, (long seed, long position)> playerRngs)
+    // Dump the current RNG stream state (seed + position per stream) — the mirror
+    // of the mod's DumpRngs and of SetRng. Debug/verification: lets us confirm
+    // that restoring a dumped state reproduces the same future draws.
+    // Debug: list members (name:type[count]) of RunState / Player / combat state
+    // so we can locate where the RNG stream dictionary actually lives.
+    public Dictionary<string, object?> DebugMembers()
+    {
+        var player = _runState?.Players != null && _runState.Players.Count > 0
+            ? _runState.Players[0] : null;
+        object? pcs = null;
+        try { pcs = player?.GetType().GetProperty("PlayerCombatState")?.GetValue(player); }
+        catch { }
+        object? Get(object? o, string prop)
+        {
+            try { return o?.GetType().GetProperty(prop)?.GetValue(o); }
+            catch { return null; }
+        }
+        const System.Reflection.BindingFlags FF =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Instance;
+        var runRng = Get(_runState, "Rng");
+        var shuffle = Get(runRng, "Shuffle");
+        object? mega = null;
+        try { mega = shuffle?.GetType().GetField("_random", FF)?.GetValue(shuffle); }
+        catch { }
+        return new Dictionary<string, object?>
+        {
+            ["type"] = "members",
+            ["mega_type"] = mega?.GetType().FullName,
+            ["mega"] = mega != null ? _Members(mega) : null,
+            ["run_seed"] = Get(runRng, "Seed")?.ToString(),
+        };
+    }
+
+    private static List<string> _Members(object o)
+    {
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly;
+        var res = new List<string>();
+        for (var t = o.GetType(); t != null && t != typeof(object); t = t.BaseType)
+        {
+            foreach (var p in t.GetProperties(F))
+            {
+                if (p.GetIndexParameters().Length > 0) continue;
+                object? v = null; try { v = p.GetValue(o); } catch { }
+                var vt = v?.GetType().Name ?? p.PropertyType.Name;
+                if (v is System.Collections.IDictionary d) vt += $"[{d.Count}]";
+                res.Add($"P {p.Name}:{vt}");
+            }
+            foreach (var f in t.GetFields(F))
+            {
+                object? v = null; try { v = f.GetValue(o); } catch { }
+                var vt = v?.GetType().Name ?? f.FieldType.Name;
+                if (v is System.Collections.IDictionary d) vt += $"[{d.Count}]";
+                res.Add($"F {f.Name}:{vt}");
+            }
+        }
+        return res;
+    }
+
+    public Dictionary<string, object?> GetRng()
     {
         try
         {
             if (_runState == null) return Error("No run in progress");
-            int applied = 0, failed = 0;
-            applied += RestoreRngs(_runState, runRngs, ref failed);
             var player = _runState.Players != null && _runState.Players.Count > 0
                 ? _runState.Players[0] : null;
-            if (player != null) applied += RestoreRngs(player, playerRngs, ref failed);
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "rng",
+                ["run"] = DumpRngSet(RngProp(_runState, "Rng")),
+                ["player"] = DumpRngSet(RngProp(player, "PlayerRng")),
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("GetRng failed", ex); }
+    }
 
+    private const System.Reflection.BindingFlags RngF =
+        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+        | System.Reflection.BindingFlags.Instance;
+
+    private static object? RngProp(object? owner, string prop)
+    {
+        try { return owner?.GetType().GetProperty(prop, RngF)?.GetValue(owner); }
+        catch { return null; }
+    }
+
+    // A RunRngSet / PlayerRngSet holds a `_rngs` Dictionary<RngType, Rng>. Each
+    // `Rng` is `_counter` (position) + `_random` (a MegaRandom xoshiro256 with
+    // four UInt64 state words _s0.._s3). The full replayable state per stream is
+    // (s0,s1,s2,s3,counter) — capture/restore that so draw order, shuffles and
+    // card generation replay EXACTLY to the live run.
+    private static Dictionary<string, object?>? DumpRngSet(object? rngSet)
+    {
+        if (rngSet == null) return null;
+        var dict = rngSet.GetType().GetField("_rngs", RngF)?.GetValue(rngSet)
+                   as System.Collections.IDictionary;
+        if (dict == null) return null;
+        var outp = new Dictionary<string, object?>();
+        foreach (System.Collections.DictionaryEntry kv in dict)
+        {
+            var rng = kv.Value;
+            if (rng == null) continue;
+            var mega = rng.GetType().GetField("_random", RngF)?.GetValue(rng);
+            if (mega == null) continue;
+            var mt = mega.GetType();
+            outp[kv.Key?.ToString() ?? "?"] = new Dictionary<string, object?>
+            {
+                ["s0"] = mt.GetField("_s0", RngF)?.GetValue(mega),
+                ["s1"] = mt.GetField("_s1", RngF)?.GetValue(mega),
+                ["s2"] = mt.GetField("_s2", RngF)?.GetValue(mega),
+                ["s3"] = mt.GetField("_s3", RngF)?.GetValue(mega),
+                ["counter"] = rng.GetType().GetField("_counter", RngF)?.GetValue(rng),
+            };
+        }
+        return outp;
+    }
+
+    // Restore MegaRandom state (+counter) per stream so draw order / shuffles /
+    // card generation replay exactly to the live run. `runStreams`/`playerStreams`
+    // map stream name -> [s0,s1,s2,s3,counter]. Streams absent from the input are
+    // left as-is.
+    public Dictionary<string, object?> SetRng(
+        Dictionary<string, ulong[]> runStreams,
+        Dictionary<string, ulong[]> playerStreams)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players != null && _runState.Players.Count > 0
+                ? _runState.Players[0] : null;
+            int applied = 0, failed = 0;
+            applied += RestoreRngSet(RngProp(_runState, "Rng"), runStreams, ref failed);
+            applied += RestoreRngSet(RngProp(player, "PlayerRng"), playerStreams, ref failed);
             Log($"SetRng: {applied} streams restored, {failed} failed");
             var decision = DetectDecisionPoint();
             if (decision != null) decision["set_rng_failed"] = failed;
@@ -750,45 +867,35 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetRng failed", ex); }
     }
 
-    private int RestoreRngs(object owner,
-        Dictionary<string, (long seed, long position)> streams, ref int failed)
+    private static int RestoreRngSet(object? rngSet,
+        Dictionary<string, ulong[]> streams, ref int failed)
     {
-        const System.Reflection.BindingFlags F =
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-            | System.Reflection.BindingFlags.Instance;
-        int applied = 0;
-        try
-        {
-            var dict = owner.GetType().GetProperty("Rngs", F)?.GetValue(owner)
-                       as System.Collections.IDictionary;
-            if (dict == null) return 0;
-            // Map string key -> the live SerializableRng, matching by key.ToString().
-            var byName = new Dictionary<string, object>();
-            foreach (System.Collections.DictionaryEntry kv in dict)
-                if (kv.Value != null) byName[kv.Key?.ToString() ?? "?"] = kv.Value;
+        if (rngSet == null) { failed += streams.Count; return 0; }
+        var dict = rngSet.GetType().GetField("_rngs", RngF)?.GetValue(rngSet)
+                   as System.Collections.IDictionary;
+        if (dict == null) { failed += streams.Count; return 0; }
+        var byName = new Dictionary<string, object>();
+        foreach (System.Collections.DictionaryEntry kv in dict)
+            if (kv.Value != null) byName[kv.Key?.ToString() ?? "?"] = kv.Value;
 
-            foreach (var (name, sp) in streams)
+        int applied = 0;
+        foreach (var (name, st) in streams)
+        {
+            if (st.Length < 5 || !byName.TryGetValue(name, out var rng)) { failed++; continue; }
+            try
             {
-                if (!byName.TryGetValue(name, out var rng)) { failed++; continue; }
-                var t = rng.GetType();
-                var seedProp = t.GetProperty("Seed", F);
-                var posProp = t.GetProperty("Position", F);
-                try
-                {
-                    if (seedProp != null && seedProp.CanWrite)
-                        seedProp.SetValue(rng, System.Convert.ChangeType(sp.seed, seedProp.PropertyType));
-                    else SetField(rng, "_seed", System.Convert.ChangeType(sp.seed,
-                        t.GetField("_seed", F)?.FieldType ?? typeof(long)));
-                    if (posProp != null && posProp.CanWrite)
-                        posProp.SetValue(rng, System.Convert.ChangeType(sp.position, posProp.PropertyType));
-                    else SetField(rng, "_position", System.Convert.ChangeType(sp.position,
-                        t.GetField("_position", F)?.FieldType ?? typeof(long)));
-                    applied++;
-                }
-                catch { failed++; }
+                var mega = rng.GetType().GetField("_random", RngF)?.GetValue(rng);
+                var mt = mega?.GetType();
+                if (mega == null || mt == null) { failed++; continue; }
+                mt.GetField("_s0", RngF)?.SetValue(mega, st[0]);
+                mt.GetField("_s1", RngF)?.SetValue(mega, st[1]);
+                mt.GetField("_s2", RngF)?.SetValue(mega, st[2]);
+                mt.GetField("_s3", RngF)?.SetValue(mega, st[3]);
+                rng.GetType().GetField("_counter", RngF)?.SetValue(rng, (int)st[4]);
+                applied++;
             }
+            catch { failed++; }
         }
-        catch { }
         return applied;
     }
 
