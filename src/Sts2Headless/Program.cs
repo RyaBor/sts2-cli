@@ -192,7 +192,21 @@ class Program
                 if (cmd.TryGetProperty("cards", out var handArr))
                     foreach (var c in handArr.EnumerateArray())
                         cards.Add(c.GetString() ?? "");
-                return sim.SetHand(cards);
+                List<string>? discard = null;
+                if (cmd.TryGetProperty("discard", out var discArr))
+                {
+                    discard = new List<string>();
+                    foreach (var c in discArr.EnumerateArray())
+                        discard.Add(c.GetString() ?? "");
+                }
+                List<string>? exhaust = null;
+                if (cmd.TryGetProperty("exhaust", out var exhArr))
+                {
+                    exhaust = new List<string>();
+                    foreach (var c in exhArr.EnumerateArray())
+                        exhaust.Add(c.GetString() ?? "");
+                }
+                return sim.SetHand(cards, discard, exhaust);
             }
 
             case "write_continue_save":

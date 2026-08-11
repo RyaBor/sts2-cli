@@ -584,13 +584,21 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetDrawOrder failed", ex); }
     }
 
-    // Force the combat hand to be exactly `cardIds`. enter_room draws a fresh
-    // turn-1 hand from the deck, which does NOT match the player's real current
-    // hand mid-combat; this rewrites the piles so the search reasons about the
-    // actual hand. Cards are matched by Id.Entry across hand+draw+discard; the
-    // requested ones go to Hand (respecting duplicate counts), everything else
-    // goes to the draw pile. Mirrors SetDrawOrder's backing-list approach.
-    public Dictionary<string, object?> SetHand(List<string> cardIds)
+    // Force the combat piles to match the player's real mid-combat state.
+    // enter_room draws a fresh turn-1 hand from the whole deck, which doesn't
+    // match reality; this rewrites the piles so the search reasons about the
+    // actual position. Each card belongs to exactly one pile:
+    //   handIds    -> Hand
+    //   discardIds -> Discard  (not drawable until a reshuffle)
+    //   exhaustIds -> Exhaust  (out of the draw cycle, but PRESENT: cards like
+    //                 Feel No Pain / Dark Embrace and exhaust-count mechanics
+    //                 need them in the exhaust pile, not silently dropped)
+    //   remainder  -> Draw
+    // The caller must include exhaust cards in the deck passed to set_player so
+    // they exist here to place. Matched by Id.Entry honoring duplicate counts.
+    // Mirrors SetDrawOrder's backing-list approach.
+    public Dictionary<string, object?> SetHand(List<string> handIds,
+        List<string>? discardIds = null, List<string>? exhaustIds = null)
     {
         try
         {
@@ -601,35 +609,44 @@ public class RunSimulator
             var handList = GetBackingList<CardModel>(pcs.Hand, "_cards");
             var drawList = GetBackingList<CardModel>(pcs.DrawPile, "_cards");
             var discardList = GetBackingList<CardModel>(pcs.DiscardPile, "_cards");
+            var exhaustList = pcs.ExhaustPile != null
+                ? GetBackingList<CardModel>(pcs.ExhaustPile, "_cards") : null;
             if (handList == null || drawList == null) return Error("Cannot access piles");
 
-            // Pool of every card currently in hand/draw/discard to draw from.
+            // Pool of every card currently across all piles, to redistribute.
             var pool = new List<CardModel>();
             pool.AddRange(handList);
             pool.AddRange(drawList);
             if (discardList != null) pool.AddRange(discardList);
+            if (exhaustList != null) pool.AddRange(exhaustList);
 
-            // Pick the requested cards (by id, honoring duplicate counts).
-            var newHand = new List<CardModel>();
-            foreach (var cardId in cardIds)
+            List<CardModel> Take(List<string> ids)
             {
-                var match = pool.FirstOrDefault(c =>
-                    c.Id.Entry.Equals(cardId, StringComparison.OrdinalIgnoreCase));
-                if (match != null) { newHand.Add(match); pool.Remove(match); }
+                var taken = new List<CardModel>();
+                foreach (var id in ids)
+                {
+                    var match = pool.FirstOrDefault(c =>
+                        c.Id.Entry.Equals(id, StringComparison.OrdinalIgnoreCase));
+                    if (match != null) { taken.Add(match); pool.Remove(match); }
+                }
+                return taken;
             }
 
-            // Everything not chosen for the hand becomes the draw pile.
-            handList.Clear();
-            handList.AddRange(newHand);
-            drawList.Clear();
-            drawList.AddRange(pool);
-            if (discardList != null) discardList.Clear();
+            var newHand = Take(handIds);
+            var newDiscard = discardIds != null ? Take(discardIds) : new List<CardModel>();
+            var newExhaust = exhaustIds != null ? Take(exhaustIds) : new List<CardModel>();
+            // Whatever remains is the draw pile.
+            handList.Clear(); handList.AddRange(newHand);
+            drawList.Clear(); drawList.AddRange(pool);
+            if (discardList != null) { discardList.Clear(); discardList.AddRange(newDiscard); }
+            if (exhaustList != null) { exhaustList.Clear(); exhaustList.AddRange(newExhaust); }
 
-            var missing = cardIds.Count - newHand.Count;
-            Log($"SetHand: {newHand.Count} in hand, {drawList.Count} in draw" +
+            var missing = (handIds.Count - newHand.Count)
+                        + ((discardIds?.Count ?? 0) - newDiscard.Count)
+                        + ((exhaustIds?.Count ?? 0) - newExhaust.Count);
+            Log($"SetHand: hand={newHand.Count} discard={newDiscard.Count} " +
+                $"exhaust={newExhaust.Count} draw={drawList.Count}" +
                 (missing > 0 ? $", {missing} requested ids not found" : ""));
-            // Return a fresh combat decision so the caller's state reflects the
-            // forced hand (not the stale one from enter_room).
             var decision = DetectDecisionPoint();
             if (decision != null) decision["set_hand_missing"] = missing;
             return decision ?? new Dictionary<string, object?> { ["type"] = "ok" };
