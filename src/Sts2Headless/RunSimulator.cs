@@ -699,6 +699,31 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetEnemies failed", ex); }
     }
 
+    // Set the player's CURRENT energy to match the live mid-turn state. enter_room
+    // starts a fresh turn (full energy), so without this the reconstruction thinks
+    // the player can afford cards they've already paid for this turn — producing
+    // impossible plays / wrong end-turn timing. Must run AFTER enter_room.
+    public Dictionary<string, object?> SetEnergy(int energy)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var pcs = _runState.Players[0].PlayerCombatState;
+            if (pcs == null) return Error("Not in combat");
+            var prop = pcs.GetType().GetProperty("Energy",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance);
+            if (prop != null && prop.CanWrite)
+                prop.SetValue(pcs, energy);
+            else
+                SetField(pcs, "<Energy>k__BackingField", energy);
+            Log($"SetEnergy: {pcs.Energy}");
+            return DetectDecisionPoint()
+                ?? new Dictionary<string, object?> { ["type"] = "ok" };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetEnergy failed", ex); }
+    }
+
     // Restore RNG stream state (seed + position per stream) so draw order and
     // card creation replay deterministically to the live run instead of the
     // fresh enter_room shuffle. `runRngs`/`playerRngs` map rng-type name ->

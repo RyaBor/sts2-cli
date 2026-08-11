@@ -225,6 +225,14 @@ class Program
                 return sim.SetEnemies(hps, blocks);
             }
 
+            case "set_energy":
+            {
+                int energy = cmd.TryGetProperty("energy", out var enEl)
+                    && enEl.ValueKind == System.Text.Json.JsonValueKind.Number
+                    ? enEl.GetInt32() : 3;
+                return sim.SetEnergy(energy);
+            }
+
             case "set_powers":
             {
                 static List<(string, int)> ParsePowers(System.Text.Json.JsonElement arr)

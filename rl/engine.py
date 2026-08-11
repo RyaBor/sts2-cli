@@ -104,7 +104,8 @@ class Engine:
                      enemy_block: list[int] | None = None,
                      player_powers: list[dict] | None = None,
                      enemy_powers: list[list] | None = None,
-                     rng_streams: dict | None = None) -> dict[str, Any]:
+                     rng_streams: dict | None = None,
+                     energy: int | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight.
 
         If `hand` (and optionally `discard`/`exhaust`) is given, after entering
@@ -187,6 +188,16 @@ class Engine:
                                   f"{p.get('stack_trace', '')}")
             if p.get("decision") == "combat_play":
                 st = p
+
+        # Set current energy to the live mid-turn value (enter_room reset it to a
+        # fresh full turn). Without this the sim recommends cards you can't afford.
+        if energy is not None:
+            n = self.send({"cmd": "set_energy", "energy": energy})
+            if n.get("type") == "error":
+                raise EngineError(f"set_energy failed: {n.get('message')}\n"
+                                  f"{n.get('stack_trace', '')}")
+            if n.get("decision") == "combat_play":
+                st = n
 
         # Restore RNG stream state so draw order + card creation replay
         # deterministically to the live run (else the sim reshuffles).
