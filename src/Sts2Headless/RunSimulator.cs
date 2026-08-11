@@ -654,6 +654,51 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetHand failed", ex); }
     }
 
+    // Set the enemies' current HP/block to match the live fight. enter_room
+    // spawns the encounter at FULL hp and full count, so without this the search
+    // re-fights fresh slimes over many extra turns and massively overestimates HP
+    // loss. `hps`/`blocks` are positional over the encounter's enemies (same
+    // order as the combat_play `enemies` list). Enemies beyond hps.Count — ones
+    // already dead in the live fight — are marked dead (hp 0). Sets private
+    // _currentHp/_block/_isDead, same approach set_player uses for the player.
+    public Dictionary<string, object?> SetEnemies(List<int> hps, List<int>? blocks = null)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var state = CombatManager.Instance.DebugOnlyGetState();
+            if (state?.Enemies == null) return Error("Not in combat");
+            // All spawned enemies, in spawn order (not filtered by alive).
+            var enemies = state.Enemies.Where(e => e != null).ToList();
+
+            int applied = 0, killed = 0;
+            for (int i = 0; i < enemies.Count; i++)
+            {
+                var e = enemies[i];
+                if (i < hps.Count)
+                {
+                    SetField(e, "_currentHp", hps[i]);
+                    SetField(e, "_block", (blocks != null && i < blocks.Count) ? blocks[i] : 0);
+                    if (hps[i] <= 0) SetField(e, "_isDead", true);
+                    applied++;
+                }
+                else
+                {
+                    // Live fight has fewer enemies than the encounter spawned:
+                    // the extras are already dead.
+                    SetField(e, "_currentHp", 0);
+                    SetField(e, "_isDead", true);
+                    killed++;
+                }
+            }
+            Log($"SetEnemies: {applied} set, {killed} marked dead " +
+                $"(encounter spawned {enemies.Count})");
+            var decision = DetectDecisionPoint();
+            return decision ?? new Dictionary<string, object?> { ["type"] = "ok" };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetEnemies failed", ex); }
+    }
+
     // ─── Game actions ───
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
     {

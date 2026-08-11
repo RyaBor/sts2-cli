@@ -99,7 +99,9 @@ class Engine:
                      potions: list[str] | None = None,
                      hand: list[str] | None = None,
                      discard: list[str] | None = None,
-                     exhaust: list[str] | None = None) -> dict[str, Any]:
+                     exhaust: list[str] | None = None,
+                     enemy_hp: list[int] | None = None,
+                     enemy_block: list[int] | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight.
 
         If `hand` (and optionally `discard`/`exhaust`) is given, after entering
@@ -151,6 +153,19 @@ class Engine:
                                   f"{h.get('stack_trace', '')}")
             if h.get("decision") == "combat_play":
                 st = h
+
+        # Set enemy HP/block to the live values (enter_room spawns them at full
+        # HP and full count, which hugely overestimates damage taken).
+        if enemy_hp is not None:
+            cmd = {"cmd": "set_enemies", "hps": enemy_hp}
+            if enemy_block is not None:
+                cmd["blocks"] = enemy_block
+            e = self.send(cmd)
+            if e.get("type") == "error":
+                raise EngineError(f"set_enemies failed: {e.get('message')}\n"
+                                  f"{e.get('stack_trace', '')}")
+            if e.get("decision") == "combat_play":
+                st = e
         return st
 
     def _clear_to_neutral(self, max_steps: int = 8) -> dict[str, Any] | None:

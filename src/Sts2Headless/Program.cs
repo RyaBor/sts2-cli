@@ -209,6 +209,22 @@ class Program
                 return sim.SetHand(cards, discard, exhaust);
             }
 
+            case "set_enemies":
+            {
+                var hps = new List<int>();
+                if (cmd.TryGetProperty("hps", out var hpsArr))
+                    foreach (var h in hpsArr.EnumerateArray())
+                        hps.Add(h.GetInt32());
+                List<int>? blocks = null;
+                if (cmd.TryGetProperty("blocks", out var blkArr))
+                {
+                    blocks = new List<int>();
+                    foreach (var b in blkArr.EnumerateArray())
+                        blocks.Add(b.GetInt32());
+                }
+                return sim.SetEnemies(hps, blocks);
+            }
+
             case "write_continue_save":
             {
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;
