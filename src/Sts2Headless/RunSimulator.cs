@@ -785,6 +785,46 @@ public class RunSimulator
         return res;
     }
 
+    // Debug: probe the power-application API so we can find the real apply path.
+    public Dictionary<string, object?> DebugPower()
+    {
+        var outp = new Dictionary<string, object?>();
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static;
+        // 1. Does a Strength PowerModel resolve, and under what id/namespace?
+        foreach (var (ns, id) in new[] { ("POWER", "STRENGTH"), ("POWER", "STRENGTH_POWER"),
+                                         ("POWERS", "STRENGTH"), ("POWER", "Strength") })
+        {
+            try
+            {
+                var m = ModelDb.GetById<PowerModel>(new ModelId(ns, id));
+                if (m != null) { outp[$"model[{ns}.{id}]"] = m.GetType().FullName; }
+            }
+            catch (Exception e) { outp[$"model_err[{ns}.{id}]"] = e.Message; }
+        }
+        // 2. PowerCmd.Apply signatures (generic + non-generic).
+        var applies = new List<string>();
+        foreach (var mm in typeof(PowerCmd).GetMethods(F))
+        {
+            if (mm.Name != "Apply") continue;
+            var ps = string.Join(", ", System.Linq.Enumerable.Select(
+                mm.GetParameters(), p => p.ParameterType.Name + " " + p.Name));
+            applies.Add($"{(mm.IsGenericMethod ? "<T> " : "")}Apply({ps})");
+        }
+        outp["apply_methods"] = applies;
+        // 3. How does a Creature hold powers?
+        try
+        {
+            var cs = CombatManager.Instance.DebugOnlyGetState();
+            var enemy = cs?.Enemies?.FirstOrDefault(e => e != null);
+            var pp = enemy?.GetType().GetProperty("Powers", F);
+            outp["enemy_powers_prop_type"] = pp?.PropertyType.FullName;
+        }
+        catch (Exception e) { outp["creature_err"] = e.Message; }
+        return outp;
+    }
+
     public Dictionary<string, object?> GetRng()
     {
         try
@@ -944,41 +984,46 @@ public class RunSimulator
     // Look up a PowerModel by id and apply it via PowerCmd.Apply, invoked by
     // reflection so we don't hard-depend on one signature. Tries the common
     // (target, amount, source, extra) arg shapes. Returns false if nothing worked.
+    // Apply a power by its MCP id (e.g. "STRENGTH", "FRAIL", "WEAK"). The engine's
+    // PowerModel ids carry a _POWER suffix (POWER.STRENGTH_POWER), and the real
+    // command is the non-generic
+    //   PowerCmd.Apply(PlayerChoiceContext ctx, PowerModel power, Creature target,
+    //                  decimal amount, Creature applier, CardModel cardSource, bool silent)
+    // invoked by reflection (null context, silent=true) and awaited.
     private bool ApplyPowerById(string id, object target, int amount, object source)
     {
         try
         {
-            var model = ModelDb.GetById<PowerModel>(new ModelId("POWER", id));
-            if (model == null) return false;
-            var mutable = model.ToMutable();
-
-            var applyMethods = typeof(PowerCmd).GetMethods(
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-                .Where(m => m.Name == "Apply" && !m.IsGenericMethod).ToList();
-            foreach (var m in applyMethods)
+            PowerModel? model = null;
+            foreach (var cand in new[] {
+                id.EndsWith("_POWER") ? id : id + "_POWER", id })
             {
-                var ps = m.GetParameters();
-                object?[]? args = null;
-                // Common shape: Apply(PowerModel, Creature target, decimal amount, Creature source, ...)
-                if (ps.Length >= 3 && typeof(PowerModel).IsAssignableFrom(ps[0].ParameterType))
-                {
-                    args = new object?[ps.Length];
-                    args[0] = mutable;
-                    args[1] = target;
-                    if (ps.Length >= 3) args[2] = System.Convert.ChangeType(amount, ps[2].ParameterType);
-                    for (int i = 3; i < ps.Length; i++)
-                        args[i] = ps[i].ParameterType == source.GetType()
-                            || ps[i].ParameterType.IsInstanceOfType(source) ? source
-                            : (ps[i].HasDefaultValue ? ps[i].DefaultValue : null);
-                }
-                if (args == null) continue;
-                var res = m.Invoke(null, args);
-                if (res is System.Threading.Tasks.Task t) t.GetAwaiter().GetResult();
-                return true;
+                model = ModelDb.GetById<PowerModel>(new ModelId("POWER", cand));
+                if (model != null) break;
             }
+            if (model == null) return false;
+
+            var apply = typeof(PowerCmd).GetMethods(
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                .FirstOrDefault(m => m.Name == "Apply" && !m.IsGenericMethod
+                    && m.GetParameters().Length == 7
+                    && typeof(PowerModel).IsAssignableFrom(m.GetParameters()[1].ParameterType));
+            if (apply == null) return false;
+            var ps = apply.GetParameters();
+            var args = new object?[7];
+            args[0] = null;                                              // PlayerChoiceContext
+            // Must pass a MUTABLE clone — the canonical model can't be used live.
+            args[1] = model.ToMutable();                               // PowerModel
+            args[2] = target;                                          // Creature target
+            args[3] = System.Convert.ChangeType(amount, ps[3].ParameterType);  // decimal amount
+            args[4] = source;                                          // Creature applier
+            args[5] = null;                                            // CardModel cardSource
+            args[6] = true;                                            // silent
+            var res = apply.Invoke(null, args);
+            if (res is System.Threading.Tasks.Task t) t.GetAwaiter().GetResult();
+            return true;
         }
-        catch (Exception ex) { Log($"ApplyPowerById('{id}'): {ex.Message}"); }
-        return false;
+        catch (Exception ex) { Log($"ApplyPowerById('{id}'): {ex.Message}"); return false; }
     }
 
     // ─── Game actions ───

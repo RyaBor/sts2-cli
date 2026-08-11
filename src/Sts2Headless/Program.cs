@@ -259,6 +259,9 @@ class Program
 
             case "debug_members":
                 return sim.DebugMembers();
+            case "debug_power":
+                return sim.DebugPower();
+
 
             case "get_rng":
                 return sim.GetRng();
