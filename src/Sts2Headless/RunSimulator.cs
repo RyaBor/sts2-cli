@@ -322,6 +322,21 @@ public class RunSimulator
         field?.SetValue(obj, value);
     }
 
+    /// <summary>Set a (possibly INHERITED private) field, walking base types.
+    /// Needed for auto-property backing fields declared on a base class
+    /// (e.g. CardModel.&lt;Enchantment&gt;k__BackingField on a card subclass).</summary>
+    private static bool SetFieldDeep(object obj, string fieldName, object? value)
+    {
+        for (var t = obj.GetType(); t != null && t != typeof(object); t = t.BaseType)
+        {
+            var f = t.GetField(fieldName, System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.DeclaredOnly);
+            if (f != null) { f.SetValue(obj, value); return true; }
+        }
+        return false;
+    }
+
     /// <summary>
     /// Re-attach an out-of-combat enchantment to a reconstructed card. The
     /// enchantment is a ModelDb entry (ADROIT, SHARP, MOMENTUM, ...); we look it
@@ -343,19 +358,30 @@ public class RunSimulator
             var mutable = model.ToMutable();
             if (amount != 0)
             {
-                var amtProp = mutable.GetType().GetProperty("Amount");
-                if (amtProp != null && amtProp.CanWrite) amtProp.SetValue(mutable, amount);
-                else SetField(mutable, "_amount", amount);
+                var mt = mutable.GetType();
+                var amtProp = mt.GetProperty("Amount", NonPublic
+                    | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (amtProp != null && amtProp.CanWrite)
+                    amtProp.SetValue(mutable, System.Convert.ChangeType(amount, amtProp.PropertyType));
+                else
+                {
+                    var af = mt.GetField("<Amount>k__BackingField", NonPublic)
+                             ?? mt.GetField("_amount", NonPublic);
+                    if (af != null) af.SetValue(mutable, System.Convert.ChangeType(amount, af.FieldType));
+                }
             }
-            var prop = card.GetType().GetProperty("Enchantment");
+            // The enchantment is an auto-property; its backing field is
+            // <Enchantment>k__BackingField (NOT _enchantment). Prefer the setter
+            // (public or private) if writable, else set the backing field.
+            var prop = card.GetType().GetProperty("Enchantment", NonPublic
+                | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
             if (prop != null && prop.CanWrite)
                 prop.SetValue(card, mutable);
             else
-                SetField(card, "_enchantment", mutable);
+                SetFieldDeep(card, "<Enchantment>k__BackingField", mutable);
 
             if (card.Enchantment == null)
-                Log($"ApplyEnchantment: failed to attach '{enchantId}' to {card.Id.Entry} " +
-                    $"(no public setter and '_enchantment' backing field not found)");
+                Log($"ApplyEnchantment: failed to attach '{enchantId}' to {card.Id.Entry}");
         }
         catch (Exception ex)
         {
