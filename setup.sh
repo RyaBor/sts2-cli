@@ -49,6 +49,21 @@ fi
 
 echo "📁 Game directory: $GAME_DIR"
 
+# The game assemblies live in a data_sts2_* subfolder, not the game root
+# (Windows: data_sts2_windows_x86_64; Linux: data_sts2_linux_x86_64; macOS the
+# path passed in already points inside the bundle). If sts2.dll isn't directly
+# in GAME_DIR, descend into the data folder so the copy loop below finds it
+# directly instead of relying on a slow per-file `find`.
+if [ ! -f "$GAME_DIR/sts2.dll" ]; then
+    for sub in "$GAME_DIR"/data_sts2_*; do
+        if [ -f "$sub/sts2.dll" ]; then
+            GAME_DIR="$sub"
+            echo "📁 Using game data subfolder: $GAME_DIR"
+            break
+        fi
+    done
+fi
+
 # ── Copy DLLs ──
 
 mkdir -p lib
