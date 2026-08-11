@@ -584,6 +584,59 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetDrawOrder failed", ex); }
     }
 
+    // Force the combat hand to be exactly `cardIds`. enter_room draws a fresh
+    // turn-1 hand from the deck, which does NOT match the player's real current
+    // hand mid-combat; this rewrites the piles so the search reasons about the
+    // actual hand. Cards are matched by Id.Entry across hand+draw+discard; the
+    // requested ones go to Hand (respecting duplicate counts), everything else
+    // goes to the draw pile. Mirrors SetDrawOrder's backing-list approach.
+    public Dictionary<string, object?> SetHand(List<string> cardIds)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var pcs = _runState.Players[0].PlayerCombatState;
+            if (pcs?.Hand == null || pcs.DrawPile == null) return Error("Not in combat");
+
+            var handList = GetBackingList<CardModel>(pcs.Hand, "_cards");
+            var drawList = GetBackingList<CardModel>(pcs.DrawPile, "_cards");
+            var discardList = GetBackingList<CardModel>(pcs.DiscardPile, "_cards");
+            if (handList == null || drawList == null) return Error("Cannot access piles");
+
+            // Pool of every card currently in hand/draw/discard to draw from.
+            var pool = new List<CardModel>();
+            pool.AddRange(handList);
+            pool.AddRange(drawList);
+            if (discardList != null) pool.AddRange(discardList);
+
+            // Pick the requested cards (by id, honoring duplicate counts).
+            var newHand = new List<CardModel>();
+            foreach (var cardId in cardIds)
+            {
+                var match = pool.FirstOrDefault(c =>
+                    c.Id.Entry.Equals(cardId, StringComparison.OrdinalIgnoreCase));
+                if (match != null) { newHand.Add(match); pool.Remove(match); }
+            }
+
+            // Everything not chosen for the hand becomes the draw pile.
+            handList.Clear();
+            handList.AddRange(newHand);
+            drawList.Clear();
+            drawList.AddRange(pool);
+            if (discardList != null) discardList.Clear();
+
+            var missing = cardIds.Count - newHand.Count;
+            Log($"SetHand: {newHand.Count} in hand, {drawList.Count} in draw" +
+                (missing > 0 ? $", {missing} requested ids not found" : ""));
+            // Return a fresh combat decision so the caller's state reflects the
+            // forced hand (not the stale one from enter_room).
+            var decision = DetectDecisionPoint();
+            if (decision != null) decision["set_hand_missing"] = missing;
+            return decision ?? new Dictionary<string, object?> { ["type"] = "ok" };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetHand failed", ex); }
+    }
+
     // ─── Game actions ───
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
     {

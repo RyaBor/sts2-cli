@@ -96,8 +96,14 @@ class Engine:
     def reset_combat(self, encounter: str | None = None, hp: int | None = None,
                      max_hp: int | None = None, deck: list[str] | None = None,
                      relics: list[str] | None = None,
-                     potions: list[str] | None = None) -> dict[str, Any]:
-        """Dismiss any leftover screen, apply loadout, and enter a fresh fight."""
+                     potions: list[str] | None = None,
+                     hand: list[str] | None = None) -> dict[str, Any]:
+        """Dismiss any leftover screen, apply loadout, and enter a fresh fight.
+
+        If `hand` is given, after entering combat the hand is forced to exactly
+        those card ids (enter_room otherwise draws a random turn-1 hand from the
+        deck, which won't match the player's real mid-combat hand).
+        """
         st = self._clear_to_neutral()
 
         loadout: dict[str, Any] = {"cmd": "set_player"}
@@ -126,6 +132,16 @@ class Engine:
                               f"{st.get('stack_trace', '')}")
         if st.get("decision") != "combat_play":
             raise EngineError(f"expected combat_play, got {st.get('decision')}")
+
+        # Force the real current hand (enter_room drew a fresh random one).
+        # set_hand returns a fresh combat_play decision reflecting the new hand.
+        if hand is not None:
+            h = self.send({"cmd": "set_hand", "cards": hand})
+            if h.get("type") == "error":
+                raise EngineError(f"set_hand failed: {h.get('message')}\n"
+                                  f"{h.get('stack_trace', '')}")
+            if h.get("decision") == "combat_play":
+                st = h
         return st
 
     def _clear_to_neutral(self, max_steps: int = 8) -> dict[str, Any] | None:

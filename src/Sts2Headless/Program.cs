@@ -186,6 +186,15 @@ class Program
                 return sim.SetDrawOrder(cards);
             }
 
+            case "set_hand":
+            {
+                var cards = new List<string>();
+                if (cmd.TryGetProperty("cards", out var handArr))
+                    foreach (var c in handArr.EnumerateArray())
+                        cards.Add(c.GetString() ?? "");
+                return sim.SetHand(cards);
+            }
+
             case "write_continue_save":
             {
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;
