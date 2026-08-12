@@ -17,6 +17,15 @@ agents observe **gold**, so drafting/pathing can plan around affording shop buys
 and card removal. Events, rest sites (default: heal), and bundles use fixed
 defaults for now.
 
+The combat observation includes **character-specific mechanics** so the agent
+can reason about them, not just play legally: Regent **stars** + per-card **star
+cost**, Defect **orbs** (passive/evoke/type), and Necrobinder **Osty** (alive /
+HP / block). Action legality (`can_play`) already handles per-character costs.
+Remaining limitation: cards that must *target Osty* aren't a distinct action
+(the space targets enemies or is untargeted); most Osty interactions are
+untargeted so this rarely bites, but it's the next thing to add if Necrobinder
+underperforms.
+
 The card/path agents are rewarded by *whole-run* success, so they learn to pick
 cards and routes that let the combat agent actually win the run — combat quality
 isn't sabotaged by bad drafting/pathing.

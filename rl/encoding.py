@@ -37,12 +37,17 @@ N_ACTIONS = POTION_DISCARD + MAX_POTIONS
 # Potions that never appear as a manual action (auto-trigger on death, etc.).
 AUTO_ONLY_POTIONS = frozenset({"FAIRY_POTION", "FAIRY_IN_A_BOTTLE"})
 
-GLOBAL_FEATS = 8
+MAX_ORBS = 5           # Defect
+ORB_HASH = 8
+GLOBAL_FEATS = 9       # +stars (Regent)
 ENEMY_FEATS = 7 + POWER_HASH
-CARD_FEATS = 10 + CARD_HASH
+CARD_FEATS = 11 + CARD_HASH        # +star_cost (Regent)
 POTION_FEATS = 2 + POTION_HASH
+ORB_FEATS = 3 + ORB_HASH           # present, passive, evoke, type-hash
+OSTY_FEATS = 3                     # alive, hp-fraction, block (Necrobinder)
 OBS_DIM = (GLOBAL_FEATS + POWER_HASH + MAX_ENEMIES * ENEMY_FEATS
-           + MAX_HAND * CARD_FEATS + MAX_POTIONS * POTION_FEATS)
+           + MAX_HAND * CARD_FEATS + MAX_POTIONS * POTION_FEATS
+           + MAX_ORBS * ORB_FEATS + OSTY_FEATS)
 
 
 def _potions(st: dict) -> list:
@@ -86,6 +91,7 @@ def encode_obs(st: dict) -> np.ndarray:
     out[5] = hp / max(max_hp, 1.0)
     out[6] = float(p.get("block") or 0) / 30.0
     out[7] = max_hp / 100.0
+    out[8] = float(st.get("stars") or 0) / 10.0        # Regent star economy
 
     i = GLOBAL_FEATS
     out[i:i + POWER_HASH] = _powers_vec(st.get("player_powers"))
@@ -122,7 +128,8 @@ def encode_obs(st: dict) -> np.ndarray:
         out[b + 7] = float(stats.get("block") or 0) / 30.0
         out[b + 8] = 1.0 if c.get("can_play") else 0.0
         out[b + 9] = 1.0 if ttype == "AnyEnemy" else 0.0
-        out[b + 10 + _bucket(str(c.get("id") or c.get("name") or ""), CARD_HASH)] = 1.0
+        out[b + 10] = float(c.get("star_cost") or 0) / 3.0        # Regent
+        out[b + 11 + _bucket(str(c.get("id") or c.get("name") or ""), CARD_HASH)] = 1.0
     i += MAX_HAND * CARD_FEATS
 
     for slot, pt in enumerate(_potions(st)[:MAX_POTIONS]):
@@ -130,6 +137,21 @@ def encode_obs(st: dict) -> np.ndarray:
         out[b + 0] = 1.0
         out[b + 1] = 1.0 if str(pt.get("target_type") or "") == "AnyEnemy" else 0.0
         out[b + 2 + _bucket(str(pt.get("id") or pt.get("name") or ""), POTION_HASH)] = 1.0
+    i += MAX_POTIONS * POTION_FEATS
+
+    for slot, orb in enumerate((st.get("orbs") or [])[:MAX_ORBS]):       # Defect
+        b = i + slot * ORB_FEATS
+        out[b + 0] = 1.0
+        out[b + 1] = float(orb.get("passive") or 0) / 20.0
+        out[b + 2] = float(orb.get("evoke") or 0) / 20.0
+        out[b + 3 + _bucket(str(orb.get("type") or orb.get("name") or ""), ORB_HASH)] = 1.0
+    i += MAX_ORBS * ORB_FEATS
+
+    osty = st.get("osty") or {}                                          # Necrobinder
+    if osty.get("alive"):
+        out[i + 0] = 1.0
+        out[i + 1] = float(osty.get("hp") or 0) / max(float(osty.get("max_hp") or 1), 1)
+        out[i + 2] = float(osty.get("block") or 0) / 30.0
 
     return out
 
