@@ -965,6 +965,83 @@ public class RunSimulator
         return applied;
     }
 
+    // Strip a leading "CARD." so callers may pass either "CARD.BASH" or "BASH".
+    // ModelId.Entry is the un-prefixed form (ModelId.ToString() re-adds "CARD.").
+    private static string NormalizeCardEntry(string id) =>
+        id.StartsWith("CARD.", StringComparison.OrdinalIgnoreCase) ? id.Substring(5) : id;
+
+    // Wire the game's TestRngInjector so a combat can be pinned deterministically.
+    //   initial_shuffle : reorder the NEXT initial draw-pile shuffle to this id
+    //                     order (matched by Id.Entry; unlisted cards appended).
+    //                     The game consumes it once, inside CardPile.Shuffle
+    //                     (ConsumeInitialShuffleOverride, right after UnstableShuffle).
+    //   card_generation : force the next combat card-generation effect (Havoc,
+    //                     random adds) to produce exactly these cards, in order.
+    //   clear           : drop all pending TestRngInjector overrides.
+    // Both overrides are single-shot (the game nulls them on consume). For
+    // MID-combat reconstruction, pin the *current* draw pile with set_draw_order
+    // and future streams with set_rng; SetInitialShuffleOverride is for a FRESH
+    // combat's opening shuffle (set it BEFORE enter_room).
+    public Dictionary<string, object?> SetTestRng(
+        List<string>? initialShuffle, List<string>? cardGeneration, bool clear)
+    {
+        try
+        {
+            if (clear)
+            {
+                TestRngInjector.Cleanup();
+                Log("SetTestRng: cleared overrides");
+                return new Dictionary<string, object?> { ["type"] = "ok", ["cleared"] = true };
+            }
+
+            int shuffleN = 0, genN = 0;
+
+            if (initialShuffle != null && initialShuffle.Count > 0)
+            {
+                var order = initialShuffle.Select(NormalizeCardEntry).ToList();
+                TestRngInjector.SetInitialShuffleOverride(cards =>
+                {
+                    // Reorder the freshly-shuffled pile to `order` (same matching
+                    // rule as SetDrawOrder); leftovers keep their post-shuffle order.
+                    var available = new List<CardModel>(cards);
+                    var reordered = new List<CardModel>();
+                    foreach (var entry in order)
+                    {
+                        var match = available.FirstOrDefault(c =>
+                            c.Id.Entry.Equals(entry, StringComparison.OrdinalIgnoreCase));
+                        if (match != null) { reordered.Add(match); available.Remove(match); }
+                    }
+                    reordered.AddRange(available);
+                    cards.Clear();
+                    cards.AddRange(reordered);
+                });
+                shuffleN = order.Count;
+            }
+
+            if (cardGeneration != null && cardGeneration.Count > 0)
+            {
+                var models = new List<CardModel>();
+                foreach (var id in cardGeneration)
+                {
+                    var canonical = ModelDb.GetById<CardModel>(
+                        new ModelId("CARD", NormalizeCardEntry(id)));
+                    if (canonical != null) models.Add((CardModel)canonical.ToMutable());
+                }
+                TestRngInjector.SetCombatCardGenerationOverride(models);
+                genN = models.Count;
+            }
+
+            Log($"SetTestRng: initial_shuffle={shuffleN} card_generation={genN}");
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "ok",
+                ["initial_shuffle"] = shuffleN,
+                ["card_generation"] = genN,
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetTestRng failed", ex); }
+    }
+
     // Apply powers to the player and enemies to match the live fight. Without
     // this the reconstruction has zero powers, so Frail/Weak/Strength/Vulnerable
     // etc. are ignored (e.g. Frail-reduced Defend blocks full, mis-scoring block).

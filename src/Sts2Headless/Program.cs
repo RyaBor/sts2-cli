@@ -295,6 +295,25 @@ class Program
                 return sim.SetRng(runRngs, playerRngs);
             }
 
+            case "set_test_rng":
+            {
+                static List<string>? ParseIds(JsonElement c, string key)
+                {
+                    if (!c.TryGetProperty(key, out var arr)
+                        || arr.ValueKind != JsonValueKind.Array) return null;
+                    var list = new List<string>();
+                    foreach (var e in arr.EnumerateArray())
+                        if (e.ValueKind == JsonValueKind.String) list.Add(e.GetString()!);
+                    return list;
+                }
+                var clearOverrides = cmd.TryGetProperty("clear", out var trEl)
+                    && trEl.ValueKind == JsonValueKind.True;
+                return sim.SetTestRng(
+                    ParseIds(cmd, "initial_shuffle"),
+                    ParseIds(cmd, "card_generation"),
+                    clearOverrides);
+            }
+
             case "write_continue_save":
             {
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;

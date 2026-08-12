@@ -105,6 +105,7 @@ class Engine:
                      player_powers: list[dict] | None = None,
                      enemy_powers: list[list] | None = None,
                      rng_streams: dict | None = None,
+                     draw_order: list[str] | None = None,
                      energy: int | None = None) -> dict[str, Any]:
         """Dismiss any leftover screen, apply loadout, and enter a fresh fight.
 
@@ -162,6 +163,16 @@ class Engine:
                                   f"{h.get('stack_trace', '')}")
             if h.get("decision") == "combat_play":
                 st = h
+
+        # Pin the draw pile to the REAL order. set_hand left the leftover cards
+        # in arbitrary order; set_draw_order reorders them top-first to match the
+        # live pile, making the fight deterministic instead of re-sampling a
+        # fresh shuffle every reconstruction (returns type=ok, no decision).
+        if draw_order:
+            d = self.send({"cmd": "set_draw_order", "cards": draw_order})
+            if d.get("type") == "error":
+                raise EngineError(f"set_draw_order failed: {d.get('message')}\n"
+                                  f"{d.get('stack_trace', '')}")
 
         # Set enemy HP/block to the live values (enter_room spawns them at full
         # HP and full count, which hugely overestimates damage taken).
