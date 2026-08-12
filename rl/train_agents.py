@@ -57,7 +57,7 @@ def collect(agents, characters, n_runs, base_seed, greedy):
     """Play n_runs full runs; return (samples-per-agent, combat/victory stats)."""
     # each buffer: obs, mask, action, return
     buf = {k: [[], [], [], []] for k in ("combat", "card", "shop", "path")}
-    stats = {"combats": [], "victories": 0, "runs": 0}
+    stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": []}
     for i in range(n_runs):
         char = characters[i % len(characters)]
         try:
@@ -71,6 +71,7 @@ def collect(agents, characters, n_runs, base_seed, greedy):
             eng.close()
         stats["runs"] += 1
         stats["victories"] += int(res["victory"])
+        stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"])))
         rr = run_reward(res)
         for (obs, mask, a, cid) in res["combat_samples"]:
             if cid < 0:
@@ -98,17 +99,30 @@ def report(stats):
         return 0.0
     wins = sum(1 for _, _, w, _ in combats if w)
     hp = sum(h for *_, h in combats) / n
+    rd = stats["runs_detail"]
+    R = len(rd) or 1
+    gwins = sum(1 for _, v, _ in rd if v)
+    avg_floor = sum(f for *_, f in rd) / R
     print(f"\n  {_BOLD}COMBAT WIN RATE: {wins}/{n} = {wins/n*100:.1f}%{_RESET}   "
-          f"avg HP retained {hp*100:.0f}%   game victories {stats['victories']}/{stats['runs']}")
-    by_char = defaultdict(lambda: [0, 0])
-    by_tier = defaultdict(lambda: [0, 0])
+          f"avg HP retained {hp*100:.0f}%")
+    print(f"  {_BOLD}GAME WIN RATE:   {gwins}/{R} = {gwins/R*100:.1f}%{_RESET}   "
+          f"avg floor {avg_floor:.1f}")
+
+    cmb = defaultdict(lambda: [0, 0])            # char -> [combat wins, combats]
     for char, tier, w, _ in combats:
-        by_char[char][0] += int(w); by_char[char][1] += 1
+        cmb[char][0] += int(w); cmb[char][1] += 1
+    game = defaultdict(lambda: [0, 0, 0.0])      # char -> [game wins, runs, floor sum]
+    for char, v, f in rd:
+        game[char][0] += int(v); game[char][1] += 1; game[char][2] += f
+    print("   by character: " + "   ".join(
+        col(c, f"{c} cmb {cmb[c][0]}/{cmb[c][1]}({(cmb[c][0]/cmb[c][1]*100 if cmb[c][1] else 0):.0f}%) "
+               f"game {gw}/{gr}({gw/gr*100:.0f}%) floor{fs/gr:.1f}")
+        for c, (gw, gr, fs) in sorted(game.items())))
+    by_tier = defaultdict(lambda: [0, 0])
+    for _, tier, w, _ in combats:
         by_tier[tier][0] += int(w); by_tier[tier][1] += 1
-    print("   by character: " + "  ".join(
-        col(c, f"{c} {w}/{t} ({w/t*100:.0f}%)") for c, (w, t) in sorted(by_char.items())))
     print("   by opponent : " + "  ".join(
-        f"{k} {w}/{t} ({w/t*100:.0f}%)" for k, (w, t) in sorted(by_tier.items())))
+        f"{k} {w}/{t}({w/t*100:.0f}%)" for k, (w, t) in sorted(by_tier.items())))
     return wins / n
 
 
