@@ -43,8 +43,8 @@ def hp_retained(c: dict) -> float:
 
 def collect(agents, characters, n_runs, base_seed, greedy):
     """Play n_runs full runs; return (samples-per-agent, combat/victory stats)."""
-    # combat: obs, mask, action, return   |   card/path: obs, mask, action, return
-    buf = {"combat": [[], [], [], []], "card": [[], [], [], []], "path": [[], [], [], []]}
+    # each buffer: obs, mask, action, return
+    buf = {k: [[], [], [], []] for k in ("combat", "card", "shop", "path")}
     stats = {"combats": [], "victories": 0, "runs": 0}
     for i in range(n_runs):
         char = characters[i % len(characters)]
@@ -65,12 +65,10 @@ def collect(agents, characters, n_runs, base_seed, greedy):
                 continue
             buf["combat"][0].append(obs); buf["combat"][1].append(mask)
             buf["combat"][2].append(a); buf["combat"][3].append(hp_retained(res["combats"][cid]))
-        for (obs, mask, a) in res["card_samples"]:
-            buf["card"][0].append(obs); buf["card"][1].append(mask)
-            buf["card"][2].append(a); buf["card"][3].append(rr)
-        for (obs, mask, a) in res["path_samples"]:
-            buf["path"][0].append(obs); buf["path"][1].append(mask)
-            buf["path"][2].append(a); buf["path"][3].append(rr)
+        for key in ("card", "shop", "path"):           # all rewarded by game victory (rr)
+            for (obs, mask, a) in res[f"{key}_samples"]:
+                buf[key][0].append(obs); buf[key][1].append(mask)
+                buf[key][2].append(a); buf[key][3].append(rr)
         for c in res["combats"]:
             stats["combats"].append((char, c["tier"], c["won"], hp_retained(c)))
         print(f"  run {i:3d} {char:11s} A10  {'WIN' if res['victory'] else 'lose'} "
@@ -118,9 +116,10 @@ def main():
     ckpt = args.resume or (args.out if os.path.exists(f"{args.out}.combat.pt") else None)
     if ckpt:
         for name in agents:
-            p = f"{ckpt}.{name}.pt"
-            if os.path.exists(p):
-                agents[name].load(p); print(f"loaded {p}")
+            try:
+                agents[name].load(f"{ckpt}.{name}.pt"); print(f"loaded {name}")
+            except Exception:
+                pass
 
     if args.eval:
         _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True)
@@ -134,7 +133,7 @@ def main():
         buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False)
         losses = {}
         losses["combat"] = agents["combat"].learn(*buf["combat"])
-        losses["card"] = agents["card"].learn(*buf["card"])
+        losses["card"] = agents["card"].learn(buf["card"], buf["shop"])   # reward + shop heads
         losses["path"] = agents["path"].learn(*buf["path"])
         wr = report(stats)
         print(f"   losses {({k: round(v,3) for k,v in losses.items()})}  "

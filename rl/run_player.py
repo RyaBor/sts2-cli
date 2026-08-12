@@ -13,7 +13,30 @@ from typing import Any
 
 from agents import (encode_obs, action_mask, decode_action,
                     encode_card_reward, card_reward_mask, MAX_OFFER,
-                    encode_map, map_mask)
+                    encode_map, map_mask,
+                    encode_shop, shop_mask, SHOP_LEAVE, SHOP_REMOVE,
+                    SHOP_BUY_CARD, SHOP_BUY_RELIC, SHOP_BUY_POTION)
+
+
+def _worst_deck_index(deck: list) -> int:
+    """Which deck card to purge: a basic Strike/Defend or a curse/status, else 0."""
+    for i, c in enumerate(deck):
+        cid = str(c.get("id") or c.get("name") or "").upper()
+        if "STRIKE" in cid or "DEFEND" in cid or c.get("type") in ("Curse", "Status"):
+            return i
+    return 0
+
+
+def _shop_action(st, a: int) -> tuple[str, dict]:
+    if a == SHOP_LEAVE:
+        return "leave_room", {}
+    if a == SHOP_REMOVE:
+        return "remove_card", {"card_index": _worst_deck_index((st.get("player") or {}).get("deck") or [])}
+    if a >= SHOP_BUY_POTION:
+        return "buy_potion", {"potion_index": a - SHOP_BUY_POTION}
+    if a >= SHOP_BUY_RELIC:
+        return "buy_relic", {"relic_index": a - SHOP_BUY_RELIC}
+    return "buy_card", {"card_index": a - SHOP_BUY_CARD}
 
 
 def _tier_from_room(room: str | None, enemies: list) -> str:
@@ -28,7 +51,8 @@ def _tier_from_room(room: str | None, enemies: list) -> str:
 def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> dict:
     combats: list[dict] = []
     combat_samples: list[tuple] = []      # (obs, mask, action, combat_idx)
-    card_samples: list[tuple] = []        # (obs, mask, action)
+    card_samples: list[tuple] = []        # (obs, mask, action)   card rewards
+    shop_samples: list[tuple] = []        # (obs, mask, action)   shop / economy
     path_samples: list[tuple] = []        # (obs, mask, action)
 
     st = eng.last
@@ -79,7 +103,8 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
                 "victory": bool(st.get("victory")),
                 "act": st.get("act") or 1, "floor": st.get("floor") or 0,
                 "combats": combats, "combat_samples": combat_samples,
-                "card_samples": card_samples, "path_samples": path_samples,
+                "card_samples": card_samples, "shop_samples": shop_samples,
+                "path_samples": path_samples,
             }
 
         if dec == "combat_play":
@@ -106,12 +131,26 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
         elif dec == "card_reward":
             cards = st.get("cards") or []
             obs, mask = encode_card_reward(st), card_reward_mask(st)
-            a = agents["card"].act(obs, mask, greedy)
+            a = agents["card"].act_reward(obs, mask, greedy)
             card_samples.append((obs, mask, a))
             if a >= MAX_OFFER or a >= len(cards):
                 st = eng.act("skip_card_reward")
             else:
                 st = eng.act("select_card_reward", card_index=a)
+
+        elif dec == "shop":
+            for _ in range(14):                       # buy a few things, then leave
+                obs, mask = encode_shop(st), shop_mask(st)
+                a = agents["card"].act_shop(obs, mask, greedy)
+                shop_samples.append((obs, mask, a))
+                name, args = _shop_action(st, a)
+                if name == "leave_room":
+                    st = eng.act("leave_room"); break
+                nxt = eng.act(name, **args)
+                if nxt is None or nxt.get("type") == "error" or nxt.get("decision") != "shop":
+                    st = nxt if (nxt and nxt.get("type") != "error") else eng.act("leave_room")
+                    break
+                st = nxt
 
         elif dec == "event_choice":
             opts = st.get("options") or []
@@ -130,13 +169,11 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
         elif dec == "bundle_select":
             st = eng.act("select_bundle", bundle_index=0)
 
-        elif dec == "shop":
-            st = eng.act("leave_room")
-
         else:
             st = eng.act("proceed")
 
     # ran out of steps
     return {"victory": False, "act": st.get("act") or 1, "floor": st.get("floor") or 0,
             "combats": combats, "combat_samples": combat_samples,
-            "card_samples": card_samples, "path_samples": path_samples}
+            "card_samples": card_samples, "shop_samples": shop_samples,
+            "path_samples": path_samples}

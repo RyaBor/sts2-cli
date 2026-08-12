@@ -15,22 +15,37 @@ import numpy as np
 
 MAX_HAND = 10
 MAX_ENEMIES = 5
+MAX_POTIONS = 3
 CARD_HASH = 64
 POWER_HASH = 16
+POTION_HASH = 16
 
 # --- action layout ---
 #   [0, MAX_HAND*MAX_ENEMIES)      play card i targeting enemy j
 #   [.., + MAX_HAND)               play card i (self / all-enemies / untargeted)
-#   last                           end turn
+#   END_TURN                       end turn
+#   [POTION_TGT, +MAX_POTIONS*MAX_ENEMIES)   use potion i targeting enemy j
+#   [POTION_UNTGT, +MAX_POTIONS)             use potion i (untargeted)
 TARGETED = MAX_HAND * MAX_ENEMIES
 UNTARGETED = TARGETED + MAX_HAND
 END_TURN = UNTARGETED
-N_ACTIONS = END_TURN + 1
+POTION_TGT = END_TURN + 1
+POTION_UNTGT = POTION_TGT + MAX_POTIONS * MAX_ENEMIES
+N_ACTIONS = POTION_UNTGT + MAX_POTIONS
+
+# Potions that never appear as a manual action (auto-trigger on death, etc.).
+AUTO_ONLY_POTIONS = frozenset({"FAIRY_POTION", "FAIRY_IN_A_BOTTLE"})
 
 GLOBAL_FEATS = 8
 ENEMY_FEATS = 7 + POWER_HASH
 CARD_FEATS = 10 + CARD_HASH
-OBS_DIM = GLOBAL_FEATS + POWER_HASH + MAX_ENEMIES * ENEMY_FEATS + MAX_HAND * CARD_FEATS
+POTION_FEATS = 2 + POTION_HASH
+OBS_DIM = (GLOBAL_FEATS + POWER_HASH + MAX_ENEMIES * ENEMY_FEATS
+           + MAX_HAND * CARD_FEATS + MAX_POTIONS * POTION_FEATS)
+
+
+def _potions(st: dict) -> list:
+    return (st.get("player") or {}).get("potions") or []
 
 
 def _bucket(text: str, size: int) -> int:
@@ -107,6 +122,13 @@ def encode_obs(st: dict) -> np.ndarray:
         out[b + 8] = 1.0 if c.get("can_play") else 0.0
         out[b + 9] = 1.0 if ttype == "AnyEnemy" else 0.0
         out[b + 10 + _bucket(str(c.get("id") or c.get("name") or ""), CARD_HASH)] = 1.0
+    i += MAX_HAND * CARD_FEATS
+
+    for slot, pt in enumerate(_potions(st)[:MAX_POTIONS]):
+        b = i + slot * POTION_FEATS
+        out[b + 0] = 1.0
+        out[b + 1] = 1.0 if str(pt.get("target_type") or "") == "AnyEnemy" else 0.0
+        out[b + 2 + _bucket(str(pt.get("id") or pt.get("name") or ""), POTION_HASH)] = 1.0
 
     return out
 
@@ -127,22 +149,40 @@ def action_mask(st: dict) -> np.ndarray:
                 mask[slot * MAX_ENEMIES + j] = True
         else:
             mask[TARGETED + slot] = True
+
+    for slot, pt in enumerate(_potions(st)[:MAX_POTIONS]):
+        if not pt.get("can_use_in_combat") or str(pt.get("id") or "") in AUTO_ONLY_POTIONS:
+            continue
+        if str(pt.get("target_type") or "") == "AnyEnemy":
+            for j in range(n_alive):
+                mask[POTION_TGT + slot * MAX_ENEMIES + j] = True
+        else:
+            mask[POTION_UNTGT + slot] = True
     return mask
 
 
 def decode_action(action: int, st: dict) -> tuple[str, dict]:
     """Map an action index to an engine command."""
-    if action >= END_TURN:
-        return "end_turn", {}
+    alive = _alive(st.get("enemies") or [])
 
-    if action >= TARGETED:
-        slot = action - TARGETED
-        card = (st.get("hand") or [])[slot]
+    if action >= POTION_UNTGT:                      # use potion i (untargeted)
+        pt = _potions(st)[action - POTION_UNTGT]
+        return "use_potion", {"potion_index": pt.get("index", action - POTION_UNTGT)}
+    if action >= POTION_TGT:                         # use potion i @ enemy j
+        slot, tgt = divmod(action - POTION_TGT, MAX_ENEMIES)
+        pt = _potions(st)[slot]
+        args = {"potion_index": pt.get("index", slot)}
+        if tgt < len(alive):
+            args["target_index"] = alive[tgt].get("index", tgt)
+        return "use_potion", args
+    if action == END_TURN:
+        return "end_turn", {}
+    if action >= TARGETED:                           # play card i (untargeted)
+        card = (st.get("hand") or [])[action - TARGETED]
         return "play_card", {"card_index": card["index"]}
 
-    slot, tgt = divmod(action, MAX_ENEMIES)
+    slot, tgt = divmod(action, MAX_ENEMIES)          # play card i @ enemy j
     card = (st.get("hand") or [])[slot]
-    alive = _alive(st.get("enemies") or [])
     args = {"card_index": card["index"]}
     if tgt < len(alive):
         args["target_index"] = alive[tgt].get("index", tgt)

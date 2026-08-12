@@ -105,6 +105,72 @@ def map_mask(state) -> np.ndarray:
     return m
 
 
+# ── shop encoding (handled by the card/economy agent) ──────────────────────
+MAX_SHOP_CARDS = 5
+MAX_SHOP_RELICS = 3
+MAX_SHOP_POTIONS = 3
+SHOP_HASH = 48
+SI = 3 + SHOP_HASH                       # per shop item: stocked, cost, affordable, id-hash
+SHOP_GLOBAL = 4
+SHOP_OBS = SHOP_GLOBAL + (MAX_SHOP_CARDS + MAX_SHOP_RELICS + MAX_SHOP_POTIONS) * SI + 2
+# action layout
+SHOP_BUY_CARD = 0
+SHOP_BUY_RELIC = SHOP_BUY_CARD + MAX_SHOP_CARDS
+SHOP_BUY_POTION = SHOP_BUY_RELIC + MAX_SHOP_RELICS
+SHOP_REMOVE = SHOP_BUY_POTION + MAX_SHOP_POTIONS
+SHOP_LEAVE = SHOP_REMOVE + 1
+SHOP_ACTIONS = SHOP_LEAVE + 1
+
+
+def encode_shop(state) -> np.ndarray:
+    out = np.zeros(SHOP_OBS, np.float32)
+    p = state.get("player") or {}
+    gold = float(p.get("gold") or 0)
+    out[0] = gold / 300.0
+    out[1] = float(p.get("deck_size") or 0) / 40.0
+    out[2] = float(_ctx(state, "act", 1)) / 3.0
+    out[3] = float(p.get("hp") or 0) / max(float(p.get("max_hp") or 1), 1)
+
+    def put(items, base, n):
+        for i, it in enumerate((items or [])[:n]):
+            b = base + i * SI
+            cost = float(it.get("cost") or 0)
+            stocked = it.get("is_stocked", True)
+            out[b + 0] = 1.0 if stocked else 0.0
+            out[b + 1] = cost / 300.0
+            out[b + 2] = 1.0 if (stocked and cost <= gold) else 0.0
+            out[b + 3 + _bucket(it.get("name") or "", SHOP_HASH)] = 1.0
+
+    off = SHOP_GLOBAL
+    put(state.get("cards"), off, MAX_SHOP_CARDS); off += MAX_SHOP_CARDS * SI
+    put(state.get("relics"), off, MAX_SHOP_RELICS); off += MAX_SHOP_RELICS * SI
+    put(state.get("potions"), off, MAX_SHOP_POTIONS); off += MAX_SHOP_POTIONS * SI
+    rc = state.get("card_removal_cost")
+    out[off] = (float(rc) / 300.0) if rc else 0.0
+    out[off + 1] = 1.0 if (rc and float(rc) <= gold) else 0.0
+    return out
+
+
+def shop_mask(state) -> np.ndarray:
+    m = np.zeros(SHOP_ACTIONS, bool)
+    p = state.get("player") or {}
+    gold = float(p.get("gold") or 0)
+
+    def can(items, base, n):
+        for i, it in enumerate((items or [])[:n]):
+            if it.get("is_stocked", True) and float(it.get("cost") or 0) <= gold:
+                m[base + i] = True
+
+    can(state.get("cards"), SHOP_BUY_CARD, MAX_SHOP_CARDS)
+    can(state.get("relics"), SHOP_BUY_RELIC, MAX_SHOP_RELICS)
+    can(state.get("potions"), SHOP_BUY_POTION, MAX_SHOP_POTIONS)
+    rc = state.get("card_removal_cost")
+    if rc and float(rc) <= gold and (p.get("deck_size") or 0) > 0:
+        m[SHOP_REMOVE] = True
+    m[SHOP_LEAVE] = True                  # leaving is always allowed
+    return m
+
+
 # ── network + agent ────────────────────────────────────────────────────────
 class PolicyNet(nn.Module):
     def __init__(self, obs_dim: int, n_actions: int, hidden: int = 256):
@@ -171,9 +237,44 @@ class Agent:
         self.net.load_state_dict(torch.load(path, map_location=self.device))
 
 
-def make_agents(device: str = "cpu") -> dict[str, Agent]:
+class CardAgent:
+    """The card/economy agent: one logical agent, two policy heads — card rewards
+    and the shop (buy card/relic/potion, remove card, leave). Both rewarded by
+    overall game victory. Saved/loaded as one agent (two .pt files)."""
+
+    def __init__(self, device: str = "cpu"):
+        self.reward = Agent("card_reward", CS_OBS, CS_ACTIONS, device=device)
+        self.shop = Agent("card_shop", SHOP_OBS, SHOP_ACTIONS, device=device)
+
+    def act_reward(self, obs, mask, greedy=False):
+        return self.reward.act(obs, mask, greedy)
+
+    def act_shop(self, obs, mask, greedy=False):
+        return self.shop.act(obs, mask, greedy)
+
+    def learn(self, reward_batch, shop_batch) -> float:
+        a = self.reward.learn(*reward_batch)
+        b = self.shop.learn(*shop_batch)
+        return (a + b) / 2
+
+    def _base(self, path):
+        return path[:-3] if path.endswith(".pt") else path
+
+    def save(self, path):
+        self.reward.save(self._base(path) + ".reward.pt")
+        self.shop.save(self._base(path) + ".shop.pt")
+
+    def load(self, path):
+        import os
+        for sub, agent in (("reward", self.reward), ("shop", self.shop)):
+            p = self._base(path) + f".{sub}.pt"
+            if os.path.exists(p):
+                agent.load(p)
+
+
+def make_agents(device: str = "cpu") -> dict:
     return {
         "combat": Agent("combat", OBS_DIM, N_ACTIONS, device=device),
-        "card": Agent("card", CS_OBS, CS_ACTIONS, device=device),
+        "card": CardAgent(device=device),
         "path": Agent("path", PS_OBS, PS_ACTIONS, device=device),
     }
