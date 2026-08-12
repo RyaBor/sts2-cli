@@ -114,7 +114,8 @@ def report(stats):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iters", type=int, default=100)
+    ap.add_argument("--iters", type=int, default=0,
+                    help="training iterations; 0 = run endlessly until Ctrl-C")
     ap.add_argument("--runs", type=int, default=10, help="runs collected per iteration")
     ap.add_argument("--characters", default=",".join(CHARACTERS))
     ap.add_argument("--device", default="cpu")
@@ -140,7 +141,8 @@ def main():
         return
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    for it in range(args.iters):
+    it = 0
+    while args.iters <= 0 or it < args.iters:      # --iters 0 => endless (Ctrl-C)
         t0 = time.time()
         print(f"\n=== iteration {it} ===")
         buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False)
@@ -155,6 +157,7 @@ def main():
             agents[name].save(f"{args.out}.{name}.pt")
         if wr >= 0.80:
             print(f"\n*** reached {wr*100:.0f}% combat win rate ***")
+        it += 1
 
 
 if __name__ == "__main__":
