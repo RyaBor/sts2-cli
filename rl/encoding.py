@@ -31,7 +31,8 @@ UNTARGETED = TARGETED + MAX_HAND
 END_TURN = UNTARGETED
 POTION_TGT = END_TURN + 1
 POTION_UNTGT = POTION_TGT + MAX_POTIONS * MAX_ENEMIES
-N_ACTIONS = POTION_UNTGT + MAX_POTIONS
+POTION_DISCARD = POTION_UNTGT + MAX_POTIONS          # ditch potion i to free a slot
+N_ACTIONS = POTION_DISCARD + MAX_POTIONS
 
 # Potions that never appear as a manual action (auto-trigger on death, etc.).
 AUTO_ONLY_POTIONS = frozenset({"FAIRY_POTION", "FAIRY_IN_A_BOTTLE"})
@@ -158,6 +159,9 @@ def action_mask(st: dict) -> np.ndarray:
                 mask[POTION_TGT + slot * MAX_ENEMIES + j] = True
         else:
             mask[POTION_UNTGT + slot] = True
+
+    for slot in range(min(len(_potions(st)), MAX_POTIONS)):
+        mask[POTION_DISCARD + slot] = True     # a held potion can always be ditched
     return mask
 
 
@@ -165,6 +169,9 @@ def decode_action(action: int, st: dict) -> tuple[str, dict]:
     """Map an action index to an engine command."""
     alive = _alive(st.get("enemies") or [])
 
+    if action >= POTION_DISCARD:                     # discard potion i (free a slot)
+        pt = _potions(st)[action - POTION_DISCARD]
+        return "discard_potion", {"potion_index": pt.get("index", action - POTION_DISCARD)}
     if action >= POTION_UNTGT:                      # use potion i (untargeted)
         pt = _potions(st)[action - POTION_UNTGT]
         return "use_potion", {"potion_index": pt.get("index", action - POTION_UNTGT)}

@@ -5,14 +5,17 @@ played through the headless CLI, for every character, and tracks **combat win ra
 
 | Agent | Decides | Reward |
 |---|---|---|
-| `combat` | play card / **use potion** / end turn | HP retained this combat = `end_hp / start_hp` (**≥1.0 = perfect win**) |
+| `combat` | play card / use potion / **discard potion** / end turn | HP retained this combat = `end_hp / start_hp` (**≥1.0 = perfect win**) |
 | `card` (two heads) | card rewards **and the shop** (buy card/relic/potion, remove card, leave) | overall **game victory** (+ small act/floor progress shaping) |
 | `path` | which map node to enter | overall **game victory** (+ progress shaping) |
 
-Potions are part of the combat action space (`encoding.py`), so the combat agent
-learns to drink them. The card agent has a second head for the shop, so drafting
-*and* buying/removing are learned together (`agents.py: CardAgent`). Events, rest
-sites (default: heal), and bundles use fixed defaults for now.
+Potions are part of the combat action space (`encoding.py`): the combat agent can
+use a potion (optionally targeted) **or discard one to free a slot** when the belt
+is full. The card agent has a second head for the shop, so drafting *and*
+buying/removing are learned together (`agents.py: CardAgent`). The card and path
+agents observe **gold**, so drafting/pathing can plan around affording shop buys
+and card removal. Events, rest sites (default: heal), and bundles use fixed
+defaults for now.
 
 The card/path agents are rewarded by *whole-run* success, so they learn to pick
 cards and routes that let the combat agent actually win the run — combat quality

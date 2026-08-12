@@ -26,7 +26,7 @@ def _bucket(s, n: int) -> int:
 MAX_OFFER = 4
 CARD_HASH = 48
 CARD_FEATS = 6 + CARD_HASH
-CS_GLOBAL = 5
+CS_GLOBAL = 6                       # hp, deck_size, act, floor, gold, n_offered
 CS_OBS = CS_GLOBAL + MAX_OFFER * CARD_FEATS
 CS_ACTIONS = MAX_OFFER + 1          # pick offered card i, or SKIP (last)
 
@@ -42,8 +42,9 @@ def encode_card_reward(state) -> np.ndarray:
     out[1] = float(p.get("deck_size") or 0) / 40.0
     out[2] = float(_ctx(state, "act", 1)) / 3.0
     out[3] = float(_ctx(state, "floor", 0)) / 50.0
+    out[4] = float(p.get("gold") or 0) / 300.0       # gold-aware drafting
     cards = state.get("cards") or []
-    out[4] = len(cards) / MAX_OFFER
+    out[5] = len(cards) / MAX_OFFER
     for i, c in enumerate(cards[:MAX_OFFER]):
         b = CS_GLOBAL + i * CARD_FEATS
         stats = c.get("stats") or {}
@@ -70,7 +71,7 @@ def card_reward_mask(state) -> np.ndarray:
 MAX_PATHS = 6
 ROOMS = ["COMBAT", "ELITE", "EVENT", "REST", "SHOP", "TREASURE", "BOSS", "UNKNOWN"]
 PATH_FEATS = len(ROOMS) + 1
-PS_GLOBAL = 3
+PS_GLOBAL = 4                      # hp, act, gold, n_choices
 PS_OBS = PS_GLOBAL + MAX_PATHS * PATH_FEATS
 PS_ACTIONS = MAX_PATHS
 
@@ -88,8 +89,9 @@ def encode_map(state) -> np.ndarray:
     p = state.get("player") or {}
     out[0] = float(p.get("hp") or 0) / max(float(p.get("max_hp") or 1), 1)
     out[1] = float(_ctx(state, "act", 1)) / 3.0
+    out[2] = float(p.get("gold") or 0) / 300.0       # gold-aware pathing (afford shop/removal)
     ch = state.get("choices") or []
-    out[2] = len(ch) / MAX_PATHS
+    out[3] = len(ch) / MAX_PATHS
     for i, c in enumerate(ch[:MAX_PATHS]):
         b = PS_GLOBAL + i * PATH_FEATS
         out[b] = 1.0
