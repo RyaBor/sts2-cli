@@ -30,6 +30,18 @@ from rl.engine import Engine, EngineError  # type: ignore
 
 CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
 
+# Per-character terminal colors (ANSI). os.system("") turns on ANSI processing
+# in Windows PowerShell / Terminal; harmless elsewhere.
+if os.name == "nt":
+    os.system("")
+_CHAR_COLORS = {"Ironclad": "\033[91m", "Silent": "\033[92m", "Defect": "\033[96m",
+                "Regent": "\033[93m", "Necrobinder": "\033[95m"}
+_RESET, _BOLD = "\033[0m", "\033[1m"
+
+
+def col(char: str, text: str) -> str:
+    return f"{_CHAR_COLORS.get(char, '')}{text}{_RESET}"
+
 
 def run_reward(res: dict) -> float:
     """Card/path return: overall victory, shaped by act/floor progress so there's
@@ -71,9 +83,10 @@ def collect(agents, characters, n_runs, base_seed, greedy):
                 buf[key][2].append(a); buf[key][3].append(rr)
         for c in res["combats"]:
             stats["combats"].append((char, c["tier"], c["won"], hp_retained(c)))
-        print(f"  run {i:3d} {char:11s} A10  {'WIN' if res['victory'] else 'lose'} "
-              f"act{res['act']} floor{res['floor']} combats={len(res['combats'])} "
-              f"wins={sum(1 for c in res['combats'] if c['won'])}")
+        cw = sum(1 for c in res['combats'] if c['won'])
+        print(col(char, f"  run {i:3d} {char:11s} A10  {'WIN ' if res['victory'] else 'lose'} "
+                        f"act{res['act']} floor{res['floor']:2d} "
+                        f"combats {cw}/{len(res['combats'])}"))
     return buf, stats
 
 
@@ -85,7 +98,7 @@ def report(stats):
         return 0.0
     wins = sum(1 for _, _, w, _ in combats if w)
     hp = sum(h for *_, h in combats) / n
-    print(f"\n  COMBAT WIN RATE: {wins}/{n} = {wins/n*100:.1f}%   "
+    print(f"\n  {_BOLD}COMBAT WIN RATE: {wins}/{n} = {wins/n*100:.1f}%{_RESET}   "
           f"avg HP retained {hp*100:.0f}%   game victories {stats['victories']}/{stats['runs']}")
     by_char = defaultdict(lambda: [0, 0])
     by_tier = defaultdict(lambda: [0, 0])
@@ -93,9 +106,9 @@ def report(stats):
         by_char[char][0] += int(w); by_char[char][1] += 1
         by_tier[tier][0] += int(w); by_tier[tier][1] += 1
     print("   by character: " + "  ".join(
-        f"{c}={w}/{t}({w/t*100:.0f}%)" for c, (w, t) in sorted(by_char.items())))
+        col(c, f"{c} {w}/{t} ({w/t*100:.0f}%)") for c, (w, t) in sorted(by_char.items())))
     print("   by opponent : " + "  ".join(
-        f"{k}={w}/{t}({w/t*100:.0f}%)" for k, (w, t) in sorted(by_tier.items())))
+        f"{k} {w}/{t} ({w/t*100:.0f}%)" for k, (w, t) in sorted(by_tier.items())))
     return wins / n
 
 
