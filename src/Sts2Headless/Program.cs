@@ -266,6 +266,9 @@ class Program
             case "get_rng":
                 return sim.GetRng();
 
+            case "get_combat_state":
+                return sim.GetCombatState();
+
             case "set_rng":
             {
                 static ulong U(System.Text.Json.JsonElement o, string k)

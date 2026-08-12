@@ -1042,6 +1042,93 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("SetTestRng failed", ex); }
     }
 
+    // Dump the FULL current combat state for an exact reconstruction: every pile
+    // in true order (so draws replay deterministically), the deck, relics, powers,
+    // enemies, and the encounter id. Lets an external searcher re-sync to reality
+    // each turn instead of replaying a long, drift-prone action history.
+    public Dictionary<string, object?> GetCombatState()
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players[0];
+            var pcs = player.PlayerCombatState;
+            var combatState = player.Creature?.CombatState;
+            if (pcs?.Hand == null || combatState == null) return Error("Not in combat");
+
+            List<Dictionary<string, object?>> Pile(object? pile)
+            {
+                var outp = new List<Dictionary<string, object?>>();
+                var lst = pile != null ? GetBackingList<CardModel>(pile, "_cards") : null;
+                if (lst != null)
+                    foreach (var c in lst)
+                        outp.Add(new() { ["id"] = c.Id.Entry, ["upgrade"] = c.CurrentUpgradeLevel });
+                return outp;
+            }
+
+            var enemies = combatState.Enemies?
+                .Where(e => e != null && e.IsAlive)
+                .Select(e => new Dictionary<string, object?>
+                {
+                    ["id"] = e.Monster?.Id.Entry,
+                    ["name"] = _loc.Monster(e.Monster?.Id.Entry ?? "UNKNOWN"),
+                    ["hp"] = e.CurrentHp,
+                    ["block"] = e.Block,
+                    ["powers"] = e.Powers?.Select(pw => new Dictionary<string, object?>
+                    {
+                        ["id"] = pw.Id.Entry, ["amount"] = pw.Amount,
+                    }).ToList(),
+                }).ToList() ?? new();
+
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "combat_state",
+                ["character"] = player.Character?.Id.Entry,
+                ["hp"] = player.Creature?.CurrentHp ?? 0,
+                ["max_hp"] = player.Creature?.MaxHp ?? 0,
+                ["energy"] = pcs.Energy,
+                ["round"] = combatState.RoundNumber,
+                ["encounter"] = CurrentEncounterId(),
+                ["relics"] = player.Relics?.Select(r => r.Id.Entry).ToList(),
+                ["hand"] = Pile(pcs.Hand),
+                ["draw"] = Pile(pcs.DrawPile),
+                ["discard"] = Pile(pcs.DiscardPile),
+                ["exhaust"] = Pile(pcs.ExhaustPile),
+                ["enemies"] = enemies,
+                ["player_powers"] = player.Creature?.Powers?.Select(pw => new Dictionary<string, object?>
+                {
+                    ["id"] = pw.Id.Entry, ["amount"] = pw.Amount,
+                }).ToList(),
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("GetCombatState failed", ex); }
+    }
+
+    // The current combat room's encounter id (scan its EncounterModel-typed
+    // member — the room type/field name varies across builds).
+    private string? CurrentEncounterId()
+    {
+        try
+        {
+            var room = _runState?.CurrentRoom;
+            if (room == null) return null;
+            const System.Reflection.BindingFlags F =
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance;
+            for (var t = room.GetType(); t != null && t != typeof(object); t = t.BaseType)
+            {
+                foreach (var p in t.GetProperties(F))
+                    if (typeof(EncounterModel).IsAssignableFrom(p.PropertyType)
+                        && p.GetValue(room) is EncounterModel encP) return encP.Id.Entry;
+                foreach (var f in t.GetFields(F))
+                    if (typeof(EncounterModel).IsAssignableFrom(f.FieldType)
+                        && f.GetValue(room) is EncounterModel encF) return encF.Id.Entry;
+            }
+        }
+        catch { }
+        return null;
+    }
+
     // Apply powers to the player and enemies to match the live fight. Without
     // this the reconstruction has zero powers, so Frail/Weak/Strength/Vulnerable
     // etc. are ignored (e.g. Frail-reduced Defend blocks full, mis-scoring block).
