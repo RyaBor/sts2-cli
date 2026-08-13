@@ -11,6 +11,7 @@ always progresses.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from agents import (encode_combat, encode_select, action_mask, decode_action,
@@ -64,7 +65,9 @@ POST_COMBAT = {"card_reward", "map_select", "rest_site", "event_choice",
                "shop", "bundle_select"}
 
 
-def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> dict:
+def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 2000,
+             max_seconds: float = 180.0) -> dict:
+    deadline = time.time() + max_seconds       # wall-clock watchdog: catch spin-loops
     combats: list[dict] = []
     combat_samples: list[tuple] = []      # (dense, card_ids, mask, action, combat_idx)
     card_samples: list[tuple] = []        # (obs, mask, action)   card rewards
@@ -128,6 +131,11 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
             close_combat(st, won=True)
             cur_combat = -1
 
+        # wall-clock watchdog: a run that spins in a fast non-terminating loop (engine
+        # still responding, so the read-timeout never fires) is caught here.
+        if time.time() > deadline:
+            end_reason = f"timeout:{dec or '?'}"
+            break
         # stuck guard
         p = st.get("player") or {}
         key = f"{dec}:{st.get('round')}:{p.get('hp')}:{len(st.get('hand') or [])}"

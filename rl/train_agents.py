@@ -140,7 +140,7 @@ def collect(agents, characters, n_runs, base_seed, greedy, faillog=None):
         # Only surface ABNORMAL runs (no combats / error / stuck) — the per-iteration
         # summary covers everything else, keeping the log readable.
         er = res.get("end_reason", "")
-        if len(res["combats"]) == 0 or er.startswith(("error", "stuck")):
+        if len(res["combats"]) == 0 or er.startswith(("error", "stuck", "timeout", "max_steps")):
             print(col(char, f"   ! {char:11s} {er} @ {res.get('last_decision')}"))
             _log_failure(faillog, eng, char, er, res)
     return buf, stats
