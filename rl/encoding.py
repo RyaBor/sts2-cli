@@ -59,7 +59,9 @@ AUTO_ONLY_POTIONS = frozenset({"FAIRY_POTION", "FAIRY_IN_A_BOTTLE"})
 
 MAX_ORBS = 10          # Defect: 3 slots default, grows with Focus/relics
 ORB_HASH = 8           # 7 orb types -> collision-free
-GLOBAL_FEATS = 12      # +stars (Regent) +encounter-tier one-hot (normal/elite/boss)
+ENCOUNTER_VOCAB_SIZE = 128   # ~90 encounters + unknown tail (which encounter, collision-free)
+# 9 base globals + encounter-tier one-hot(3) + encounter-identity vocab (which encounter)
+GLOBAL_FEATS = 12 + ENCOUNTER_VOCAB_SIZE
 ENEMY_FEATS = 7 + POWER_HASH + INTENT_TYPE_HASH   # +intent-type multi-hot
 POTION_FEATS = 2 + POTION_HASH
 ORB_FEATS = 3 + ORB_HASH           # present, passive, evoke, type-hash
@@ -103,6 +105,34 @@ def _load_card_vocab() -> dict:
         return {cid: i for i, cid in enumerate(ids) if i < CARD_VOCAB_SIZE}
     except Exception:
         return {}
+
+
+def _load_vocab(fname: str) -> dict:
+    """Deterministic id -> index map from a game loc table (sorted for stability)."""
+    import os
+    import json
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "localization_eng", fname)
+    try:
+        keys = json.load(open(path, encoding="utf-8")).keys()
+        ids = sorted({k.rsplit(".", 1)[0] for k in keys if "." in k})
+        return {cid: i for i, cid in enumerate(ids)}
+    except Exception:
+        return {}
+
+
+_ENCOUNTER_VOCAB = _load_vocab("encounters.json")
+_ENC_UNK = min(len(_ENCOUNTER_VOCAB), ENCOUNTER_VOCAB_SIZE - 16)
+
+
+def _encounter_index(eid) -> int:
+    """Vocab index for an encounter id (AEONGLASS_BOSS/NIBBITS_WEAK/...); unknown ids
+    hash into the reserved tail so which encounter you're in is distinguishable."""
+    s = str(eid or "")
+    idx = _ENCOUNTER_VOCAB.get(s)
+    if idx is not None and idx < ENCOUNTER_VOCAB_SIZE:
+        return idx
+    return _ENC_UNK + _bucket(s, ENCOUNTER_VOCAB_SIZE - _ENC_UNK)
 
 
 _CARD_VOCAB = _load_card_vocab()
@@ -265,6 +295,7 @@ def encode_combat(st: dict):
     out[9] = 1.0 if ("BOSS" not in rt and "ELITE" not in rt) else 0.0   # normal
     out[10] = 1.0 if "ELITE" in rt else 0.0
     out[11] = 1.0 if "BOSS" in rt else 0.0
+    out[12 + _encounter_index(st.get("encounter"))] = 1.0   # which encounter (Aeonglass/Nibbits/...)
 
     i = GLOBAL_FEATS
     out[i:i + POWER_HASH] = _powers_vec(st.get("player_powers"))

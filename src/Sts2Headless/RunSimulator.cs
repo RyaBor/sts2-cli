@@ -3116,6 +3116,7 @@ public class RunSimulator
             ["type"] = "decision",
             ["decision"] = "combat_play",
             ["context"] = RunContext(),
+            ["encounter"] = CurrentEncounterId(),      // e.g. AEONGLASS_BOSS / NIBBITS_WEAK
             ["round"] = combatState?.RoundNumber ?? 0,
             ["energy"] = pcs?.Energy ?? 0,
             ["max_energy"] = pcs?.MaxEnergy ?? 0,
