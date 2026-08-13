@@ -48,6 +48,13 @@ def _tier_from_room(room: str | None, enemies: list) -> str:
     return "COMBAT"
 
 
+# Decisions that mean a fight is genuinely OVER (reward/map/etc.). Note card_SELECT
+# (Armaments, discover) is an IN-combat prompt and is deliberately NOT here — that
+# was splitting one fight into several counted "combats".
+POST_COMBAT = {"card_reward", "map_select", "rest_site", "event_choice",
+               "shop", "bundle_select"}
+
+
 def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> dict:
     combats: list[dict] = []
     combat_samples: list[tuple] = []      # (obs, mask, action, combat_idx)
@@ -78,10 +85,12 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
             break
         dec = st.get("decision", "")
 
-        # combat boundary bookkeeping
-        if dec == "combat_play" and prev_decision != "combat_play":
+        # combat boundary bookkeeping: open a fight on the first combat_play, and
+        # only close it (as won) when we reach a real post-combat screen. Staying
+        # in combat across an in-combat card_select no longer ends the fight.
+        if dec == "combat_play" and cur_combat < 0:
             in_combat_start(st)
-        elif dec != "combat_play" and prev_decision == "combat_play" and dec != "game_over":
+        elif cur_combat >= 0 and dec in POST_COMBAT:
             close_combat(st, won=True)
             cur_combat = -1
 
