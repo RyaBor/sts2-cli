@@ -81,6 +81,7 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
     last_key, stuck = None, 0
     trace: list[str] = []                 # decision sequence, for diagnosing dead runs
     end_reason = "max_steps"              # overwritten at the real exit
+    consec_err = 0                        # consecutive engine errors, for graceful recovery
 
     def in_combat_start(state):
         nonlocal cur_combat
@@ -96,8 +97,20 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
 
     for _ in range(max_steps):
         if st.get("type") == "error":
+            # Don't kill the run on a stray engine error (rare harness edge, e.g. a
+            # transient card_select race). Nudge past the failed action and continue;
+            # only give up after several consecutive failures.
+            consec_err += 1
             end_reason = f"error:{str(st.get('message'))[:80]}"
-            break
+            if consec_err > 3:
+                break
+            recov = "end_turn" if prev_decision == "combat_play" else "proceed"
+            try:
+                st = eng.act(recov)
+            except Exception:
+                break
+            continue
+        consec_err = 0
         dec = st.get("decision", "")
         trace.append(dec)
 

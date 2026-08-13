@@ -237,6 +237,11 @@ public class RunSimulator
     private bool _rewardsProcessed;
     private int _goldBeforeCombat;
     private int _lastKnownHp;
+    // Background task for an option/purchase whose effect pauses on a card selection
+    // (event Chosen, rest Smith, shop buy/remove). DoSelectCards waits on this before
+    // reading state, so the resumed task can't mutate piles while we enumerate them
+    // (fixes 'Collection was modified' races at card_select).
+    private System.Threading.Tasks.Task? _asyncOptionTask;
     // A10 Act-3 "double boss": true once we've started the SECOND boss combat so we
     // don't loop back into it. Reset when a new act is entered / a run starts.
     private bool _secondBossStarted;
@@ -1760,11 +1765,18 @@ public class RunSimulator
         RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
         WaitForActionExecutor();
 
-        // Check if card play had no effect (hand unchanged, same card still at same index)
+        // A card still sitting in its hand slot is NOT necessarily a failure. It is normal
+        // for return-to-hand cards (Particle Wall: "Gain Block. Return this card to your
+        // Hand."), and a perfectly legal play can resolve to *zero* observable effect — e.g.
+        // Particle Wall under negative Dexterity gaining 0 block, or a 0-damage attack while
+        // Weak. State-diffing cannot tell those legal plays apart from a rare silent engine
+        // failure, and aborting a legal play is the worse outcome — so we do NOT error here.
+        // We just log it; a genuinely stuck card that the agent keeps re-selecting is caught
+        // by the caller's stuck-guard. (CanPlay above already rejects truly illegal plays.)
         var handAfter = pcs.Hand.Cards;
         if (handAfter.Count == handCountBefore && cardIndex < handAfter.Count && handAfter[cardIndex] == card)
         {
-            return Error($"Card could not be played (still in hand after action): {card.GetType().Name} [{card.Id}]");
+            Log($"Card still in hand after play (return-to-hand or zero-effect, not an error): {card.Id}");
         }
 
         return DetectDecisionPoint();
@@ -2066,7 +2078,7 @@ public class RunSimulator
             // pending selection appears so the caller can resolve it; the background task
             // continues once the selector's TCS is fed by select_cards.
             var inv = merchantRoom.GetLocalInventory();
-            var task = Task.Run(() => entry.OnTryPurchaseWrapper(inv));
+            var task = _asyncOptionTask = Task.Run(() => entry.OnTryPurchaseWrapper(inv));
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -2131,7 +2143,7 @@ public class RunSimulator
         try
         {
             // Run on background thread so card selection can pause (same pattern as event options)
-            var task = Task.Run(() => removal.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
+            var task = _asyncOptionTask = Task.Run(() => removal.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -2176,6 +2188,26 @@ public class RunSimulator
         return DetectDecisionPoint();
     }
 
+    /// <summary>Wait for the background option/purchase task (event Chosen / rest Smith /
+    /// shop buy) to finish mutating piles after a selection is resolved, so the main thread
+    /// doesn't enumerate a collection it's still modifying. Breaks early if the task opens
+    /// the NEXT selection (then that decision is returned instead). Bounded so it can't hang.</summary>
+    private void SettleAsyncOption()
+    {
+        var t = _asyncOptionTask;
+        if (t == null) return;
+        for (int i = 0; i < 300; i++)
+        {
+            _syncCtx.Pump();
+            if (t.IsCompleted) { _asyncOptionTask = null; break; }
+            // A follow-up selection/bundle means the task paused again — stop and let the
+            // caller surface that next decision.
+            if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
+                break;
+            Thread.Sleep(10);
+        }
+    }
+
     private Dictionary<string, object?> DoSelectCards(Player player, Dictionary<string, object?>? args)
     {
         if (!_cardSelector.HasPending)
@@ -2192,6 +2224,7 @@ public class RunSimulator
         Log($"Card selection: indices [{string.Join(",", indices)}]");
         _cardSelector.ResolvePendingByIndices(indices);
         _syncCtx.Pump();
+        SettleAsyncOption();      // let the resumed option/purchase task finish mutating piles
         WaitForActionExecutor();
 
         // Extra wait for rest-site SMITH: the background ChooseLocalOption task
@@ -2343,7 +2376,7 @@ public class RunSimulator
             try
             {
                 // Run on background thread so Smith card selection can pause
-                var task = Task.Run(() => RunManager.Instance.RestSiteSynchronizer.ChooseLocalOption(optionIndex));
+                var task = _asyncOptionTask = Task.Run(() => RunManager.Instance.RestSiteSynchronizer.ChooseLocalOption(optionIndex));
                 for (int i = 0; i < 100; i++)
                 {
                     _syncCtx.Pump();
@@ -2396,7 +2429,7 @@ public class RunSimulator
                         _eventOptionChosen = true;
                         _lastEventOptionCount = options.Count;
                         // Run on thread pool so GetSelectedCards/GetSelectedCardReward can block
-                        var task = Task.Run(() => options[optionIndex].Chosen());
+                        var task = _asyncOptionTask = Task.Run(() => options[optionIndex].Chosen());
                         for (int i = 0; i < 100; i++)
                         {
                             _syncCtx.Pump();
