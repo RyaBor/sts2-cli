@@ -2892,7 +2892,7 @@ public class RunSimulator
             ["player"] = PlayerSummary(_runState!.Players[0]),
             ["act"] = _runState.CurrentActIndex + 1,
             ["act_name"] = _loc.Act(_runState.Act?.Id.Entry ?? "OVERGROWTH"),
-            ["floor"] = _runState.ActFloor,
+            ["floor"] = _runState.TotalFloor,   // cumulative across acts (does NOT reset per act)
         };
     }
 
@@ -3774,7 +3774,7 @@ public class RunSimulator
             ["victory"] = isVictory,
             ["player"] = summary,
             ["act"] = _runState.CurrentActIndex + 1,
-            ["floor"] = _runState.ActFloor,
+            ["floor"] = _runState.TotalFloor,   // cumulative across acts (does NOT reset per act)
         };
     }
 
@@ -3948,7 +3948,7 @@ public class RunSimulator
         {
             ["act"] = _runState.CurrentActIndex + 1,
             ["act_name"] = _loc.Act(_runState.Act?.Id.Entry ?? "OVERGROWTH"),
-            ["floor"] = _runState.ActFloor,
+            ["floor"] = _runState.TotalFloor,   // cumulative across acts (does NOT reset per act)
             ["room_type"] = _runState.CurrentRoom?.RoomType.ToString(),
         };
 
