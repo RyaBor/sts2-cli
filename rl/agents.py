@@ -17,7 +17,7 @@ import torch.nn as nn
 
 from encoding import (N_ACTIONS, DENSE_DIM, EMBED_DIM, CARD_VOCAB_SIZE, PAD_CARD,
                       MAX_HAND, CARD_DENSE, CARD_ENCH_HASH, SEL_GLOBAL, MAX_SEL,
-                      _card_index, _write_card_dense,
+                      EVENT_VOCAB_SIZE, _card_index, _event_index, _write_card_dense,
                       encode_combat, encode_select, action_mask, decode_action)  # noqa: F401
 import torch.nn.functional as F
 
@@ -181,12 +181,14 @@ def map_mask(state) -> np.ndarray:
 # option identity via a hash + a few signed resource magnitudes (gold / hp-cost /
 # hp-or-heal gain), rewarded by overall game victory like the rest of the agent.
 MAX_OPTIONS = 6
-EV_NAME_HASH = 32
-OPT_HASH = 32
+OPT_HASH = 64                         # option identity (widened from 32 to reduce collisions)
 OPT_VARS = 3                          # gold, hp-cost, hp/heal-gain (normalized)
 OPT_FEATS = 2 + OPT_VARS + OPT_HASH   # present, is_locked, vars, id-hash
 EV_GLOBAL = 6                         # hp, act, floor, gold, deck_size, n_options
-EV_OBS = EV_GLOBAL + EV_NAME_HASH + MAX_OPTIONS * OPT_FEATS
+# Event IDENTITY via a proper vocab (72 events+ancients + tail) instead of a 32-bucket
+# hash — the old hash collided ~2-3 events per bucket, so the agent couldn't tell many
+# events apart. Consequences (relic/card/curse/fight) are learned via the run reward.
+EV_OBS = EV_GLOBAL + EVENT_VOCAB_SIZE + MAX_OPTIONS * OPT_FEATS
 EV_ACTIONS = MAX_OPTIONS
 
 
@@ -219,8 +221,8 @@ def encode_event(state) -> np.ndarray:
     out[4] = float(p.get("deck_size") or 0) / 40.0
     opts = state.get("options") or []
     out[5] = len(opts) / MAX_OPTIONS
-    out[EV_GLOBAL + _bucket(state.get("event_name") or "", EV_NAME_HASH)] = 1.0
-    base0 = EV_GLOBAL + EV_NAME_HASH
+    out[EV_GLOBAL + _event_index(state.get("event_name"))] = 1.0
+    base0 = EV_GLOBAL + EVENT_VOCAB_SIZE
     for i, o in enumerate(opts[:MAX_OPTIONS]):
         b = base0 + i * OPT_FEATS
         gold, hp_cost, hp_gain = _opt_vars(o)

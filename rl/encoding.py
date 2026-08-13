@@ -60,6 +60,7 @@ AUTO_ONLY_POTIONS = frozenset({"FAIRY_POTION", "FAIRY_IN_A_BOTTLE"})
 MAX_ORBS = 10          # Defect: 3 slots default, grows with Focus/relics
 ORB_HASH = 8           # 7 orb types -> collision-free
 ENCOUNTER_VOCAB_SIZE = 128   # ~90 encounters + unknown tail (which encounter, collision-free)
+EVENT_VOCAB_SIZE = 96        # 72 events+ancients + unknown tail (which event, collision-free)
 # 9 base globals + encounter-tier one-hot(3) + encounter-identity vocab (which encounter)
 GLOBAL_FEATS = 12 + ENCOUNTER_VOCAB_SIZE
 ENEMY_FEATS = 7 + POWER_HASH + INTENT_TYPE_HASH   # +intent-type multi-hot
@@ -139,6 +140,38 @@ def _encounter_index(eid) -> int:
     if idx is not None and idx < ENCOUNTER_VOCAB_SIZE:
         return idx
     return _ENC_UNK + _bucket(s, ENCOUNTER_VOCAB_SIZE - _ENC_UNK)
+
+
+def _load_event_vocab() -> dict:
+    """Deterministic event/ancient id -> index map, merged from events.json AND
+    ancients.json (both surface as the 'event_choice' decision). Keys are the entry
+    roots (GOLDEN_IDOL, NEOW, ...), uppercased so mixed-case ids ('Neow') still match."""
+    import os
+    import json
+    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "localization_eng")
+    roots: set[str] = set()
+    for fname in ("events.json", "ancients.json"):
+        try:
+            for k in json.load(open(os.path.join(base, fname), encoding="utf-8")):
+                roots.add(k.split(".", 1)[0].upper())
+        except Exception:
+            pass
+    return {cid: i for i, cid in enumerate(sorted(roots)) if i < EVENT_VOCAB_SIZE}
+
+
+_EVENT_VOCAB = _load_event_vocab()
+_EV_UNK = min(len(_EVENT_VOCAB), EVENT_VOCAB_SIZE - 12)
+
+
+def _event_index(name) -> int:
+    """Vocab index for an event/ancient id; unknown ids hash into the reserved tail so
+    each of the ~72 events is distinguishable (vs the old 32-bucket hash that collided)."""
+    s = str(name or "").upper()
+    idx = _EVENT_VOCAB.get(s)
+    if idx is not None and idx < EVENT_VOCAB_SIZE:
+        return idx
+    return _EV_UNK + _bucket(s, EVENT_VOCAB_SIZE - _EV_UNK)
 
 
 _CARD_VOCAB = _load_card_vocab()
