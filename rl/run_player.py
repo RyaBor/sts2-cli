@@ -269,23 +269,36 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 2000,
 
         elif dec == "card_select":
             cards = st.get("cards") or []
-            room = str((st.get("context") or {}).get("room_type") or "").upper()
-            if cards and "REST" in room:               # smith: pick WHICH card to upgrade
+            if not cards or int(st.get("max_select") or 1) == 0:
+                st = eng.act("skip_select")
+            elif cur_combat >= 0:
+                # IN-COMBAT selection (Armaments, Dual Wield, Exhume, discover, ...) —
+                # scored by the COMBAT agent's selection head against the live fight.
+                glob, cd, ci, n = encode_select(st)
+                mn = int(st.get("min_select") or 1)
+                idxs = agents["combat"].act_select(glob, cd, ci, n, mn, greedy)
+                select_samples.append((glob, cd, ci, n, idxs[0], cur_combat))
+                picked = ",".join(str(cards[k].get("index", k)) for k in idxs if k < len(cards))
+                st = eng.act("select_cards", indices=picked or "0")
+            else:
+                # OUT-OF-COMBAT selection — rest-site smithing AND event card choices
+                # (transform / remove / duplicate / choose-a-card / pick from another
+                # character). These belong to the CARD agent's card-picker head, NOT the
+                # combat agent: no fight is open, so combat/enemy features are meaningless
+                # and the combat select head shouldn't be trained on them.
                 obs, mask = encode_upgrade(st), upgrade_mask(st)
                 a = agents["card"].act_upgrade(obs, mask, greedy)
                 upgrade_samples.append((obs, mask, a))
                 a = min(a, len(cards) - 1)
-                st = eng.act("select_cards", indices=str(cards[a].get("index", a)))
-            elif not cards or int(st.get("max_select") or 1) == 0:
-                st = eng.act("skip_select")
-            else:                                       # in-combat select → combat agent
-                glob, cd, ci, n = encode_select(st)
-                mn = int(st.get("min_select") or 1)
-                idxs = agents["combat"].act_select(glob, cd, ci, n, mn, greedy)
-                if cur_combat >= 0:
-                    select_samples.append((glob, cd, ci, n, idxs[0], cur_combat))
-                picked = ",".join(str(cards[k].get("index", k)) for k in idxs if k < len(cards))
-                st = eng.act("select_cards", indices=picked or "0")
+                mn = max(1, int(st.get("min_select") or 1))
+                picks = [cards[a].get("index", a)]
+                for k in range(len(cards)):              # fill if the prompt needs >1 card
+                    if len(picks) >= mn:
+                        break
+                    idx = cards[k].get("index", k)
+                    if idx not in picks:
+                        picks.append(idx)
+                st = eng.act("select_cards", indices=",".join(str(x) for x in picks))
 
         elif dec == "bundle_select":
             st = eng.act("select_bundle", bundle_index=0)
