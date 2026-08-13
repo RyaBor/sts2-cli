@@ -83,6 +83,7 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 2000,
     prev_decision = None
     cur_combat = -1                       # index into combats, -1 = not in combat
     last_key, stuck = None, 0
+    plays_this_turn, noop_streak = 0, 0   # break within-turn card-play loops
     trace: list[str] = []                 # decision sequence, for diagnosing dead runs
     end_reason = "max_steps"              # overwritten at the real exit
     consec_err = 0                        # consecutive engine errors, for graceful recovery
@@ -163,12 +164,35 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 2000,
             }
 
         if dec == "combat_play":
+            # Break within-turn loops: a card that no-ops (e.g. a Shiv that leaves the
+            # enemy/hand unchanged) or 0-cost spam can be replayed forever without ending
+            # the turn. If the last several plays changed nothing, or we've played an
+            # absurd number this turn, force end_turn.
+            if noop_streak >= 6 or plays_this_turn > 40:
+                st = eng.act("end_turn")
+                plays_this_turn, noop_streak = 0, 0
+                continue
             dense, ids = encode_combat(st)
             mask = action_mask(st)
             a = agents["combat"].act(dense, ids, mask, greedy)
             combat_samples.append((dense, ids, mask, a, cur_combat))
             name, args = decode_action(a, st)
+
+            def _combat_sig(s):
+                pl = s.get("player") or {}
+                return (len(s.get("hand") or []), s.get("energy"), pl.get("block"),
+                        tuple(e.get("hp") for e in (s.get("enemies") or [])))
+            before = _combat_sig(st)
             st = eng.act(name, **args)
+            if name == "end_turn":
+                plays_this_turn, noop_streak = 0, 0
+            elif name == "play_card":
+                plays_this_turn += 1
+                # no observable change (hp/block/energy/hand all identical) -> no-op play
+                if st.get("decision") == "combat_play" and _combat_sig(st) == before:
+                    noop_streak += 1
+                else:
+                    noop_streak = 0
 
         elif dec == "map_select":
             ch = st.get("choices") or []
