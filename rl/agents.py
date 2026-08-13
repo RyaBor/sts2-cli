@@ -69,7 +69,9 @@ def card_reward_mask(state) -> np.ndarray:
 
 # ── map-node (path) encoding ───────────────────────────────────────────────
 MAX_PATHS = 6
-ROOMS = ["COMBAT", "ELITE", "EVENT", "REST", "SHOP", "TREASURE", "BOSS", "UNKNOWN"]
+# Must match the engine's MapPointType.ToString() (see RunSimulator map choices):
+# Monster, Elite, Boss, Shop, Treasure, RestSite, Ancient, Unknown/Unassigned.
+ROOMS = ["MONSTER", "ELITE", "BOSS", "SHOP", "TREASURE", "RESTSITE", "ANCIENT", "UNKNOWN"]
 PATH_FEATS = len(ROOMS) + 1
 PS_GLOBAL = 4                      # hp, act, gold, n_choices
 PS_OBS = PS_GLOBAL + MAX_PATHS * PATH_FEATS
