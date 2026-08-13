@@ -76,7 +76,7 @@ def collect(agents, characters, n_runs, base_seed, greedy):
            ("card", "shop", "event", "rest", "upgrade", "path")}
     buf["combat"] = [[], [], [], [], []]      # dense, card_ids, mask, action, return
     buf["cselect"] = [[], [], [], [], [], []]  # glob, cand_dense, cand_ids, n, action, return
-    stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": []}
+    stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": [], "events": 0}
     for i in range(n_runs):
         char = characters[i % len(characters)]
         try:
@@ -110,52 +110,55 @@ def collect(agents, characters, n_runs, base_seed, greedy):
                 buf[key][2].append(a); buf[key][3].append(rr)
         for c in res["combats"]:
             stats["combats"].append((char, c["tier"], c["won"], hp_retained(c)))
-        cw = sum(1 for c in res['combats'] if c['won'])
-        # Surface WHY a run produced no combats (the "0/0" case) or ended abnormally,
-        # so the cause shows up in real training logs instead of being a mystery.
-        why = ""
+        stats["events"] += len(res.get("event_samples") or [])
+        # Only surface ABNORMAL runs (no combats / error / stuck) — the per-iteration
+        # summary covers everything else, keeping the log readable.
         er = res.get("end_reason", "")
         if len(res["combats"]) == 0 or er.startswith(("error", "stuck")):
-            why = f"  [{er} @ {res.get('last_decision')}]"
-        print(col(char, f"  run {i:3d} {char:11s} A10  {'WIN ' if res['victory'] else 'lose'} "
-                        f"act{res['act']} floor{res['floor']:2d} "
-                        f"combats {cw}/{len(res['combats'])}{why}"))
+            print(col(char, f"   ! {char:11s} {er} @ {res.get('last_decision')}"))
     return buf, stats
 
 
-def report(stats):
+_ABBR = {"Ironclad": "Iron", "Silent": "Slnt", "Defect": "Dfct",
+         "Regent": "Rgnt", "Necrobinder": "Necr"}
+
+
+def report(stats, it=0, secs=0.0, best=None):
+    """Compact one-block-per-iteration summary. `best` (dict) tracks bests across iters."""
+    best = best if best is not None else {}
     combats = stats["combats"]
     n = len(combats)
-    if n == 0:
-        print("  (no combats)")
-        return 0.0
-    wins = sum(1 for _, _, w, _ in combats if w)
-    hp = sum(h for *_, h in combats) / n
     rd = stats["runs_detail"]
     R = len(rd) or 1
-    gwins = sum(1 for _, v, _ in rd if v)
+    cw = sum(1 for _, _, w, _ in combats if w)
+    combat_wr = cw / n if n else 0.0
+    hp = (sum(h for *_, h in combats) / n) if n else 0.0
+    gw = sum(1 for _, v, _ in rd if v)
+    game_wr = gw / R
     avg_floor = sum(f for *_, f in rd) / R
-    print(f"\n  {_BOLD}COMBAT WIN RATE: {wins}/{n} = {wins/n*100:.1f}%{_RESET}   "
-          f"avg HP retained {hp*100:.0f}%")
-    print(f"  {_BOLD}GAME WIN RATE:   {gwins}/{R} = {gwins/R*100:.1f}%{_RESET}   "
-          f"avg floor {avg_floor:.1f}")
+    best["combat"] = max(best.get("combat", 0.0), combat_wr)
+    best["game"] = max(best.get("game", 0.0), game_wr)
+    best["floor"] = max(best.get("floor", 0.0), avg_floor)
 
-    cmb = defaultdict(lambda: [0, 0])            # char -> [combat wins, combats]
-    for char, tier, w, _ in combats:
-        cmb[char][0] += int(w); cmb[char][1] += 1
-    game = defaultdict(lambda: [0, 0, 0.0])      # char -> [game wins, runs, floor sum]
-    for char, v, f in rd:
-        game[char][0] += int(v); game[char][1] += 1; game[char][2] += f
-    print("   by character: " + "   ".join(
-        col(c, f"{c} cmb {cmb[c][0]}/{cmb[c][1]}({(cmb[c][0]/cmb[c][1]*100 if cmb[c][1] else 0):.0f}%) "
-               f"game {gw}/{gr}({gw/gr*100:.0f}%) floor{fs/gr:.1f}")
-        for c, (gw, gr, fs) in sorted(game.items())))
-    by_tier = defaultdict(lambda: [0, 0])
-    for _, tier, w, _ in combats:
-        by_tier[tier][0] += int(w); by_tier[tier][1] += 1
-    print("   by opponent : " + "  ".join(
-        f"{k} {w}/{t}({w/t*100:.0f}%)" for k, (w, t) in sorted(by_tier.items())))
-    return wins / n
+    tier = defaultdict(lambda: [0, 0])
+    for _, t, w, _ in combats:
+        tier[t][0] += int(w); tier[t][1] += 1
+    tc = lambda k: f"{tier[k][0]}/{tier[k][1]}"
+    cmb = defaultdict(lambda: [0, 0])
+    for c, _, w, _ in combats:
+        cmb[c][0] += int(w); cmb[c][1] += 1
+    chars = "  ".join(col(c, f"{_ABBR.get(c, c[:4])} {(cmb[c][0]/cmb[c][1]*100 if cmb[c][1] else 0):.0f}%")
+                      for c in sorted(cmb))
+
+    print(f"\n{_BOLD}── iter {it} · {secs:.0f}s ─────────────────────────────────{_RESET}")
+    print(f" combat {_BOLD}{combat_wr*100:3.0f}%{_RESET} (best {best['combat']*100:.0f}%)"
+          f"      game {_BOLD}{game_wr*100:3.0f}%{_RESET} (best {best['game']*100:.0f}%)")
+    print(f" floor {avg_floor:4.1f} (best {best['floor']:.0f})       HP kept {hp*100:.0f}%")
+    print(f" fights  normal {tc('COMBAT')}   elite {tc('ELITE')}   boss {tc('BOSS')}"
+          f"      events {stats.get('events', 0)}")
+    if chars:
+        print(f" chars   {chars}")
+    return combat_wr
 
 
 def main():
@@ -183,28 +186,24 @@ def main():
 
     if args.eval:
         _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True)
-        report(stats)
+        report(stats, it=0, secs=0.0, best={})
         return
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    best = {}                                       # bests across iterations
     it = 0
     while args.iters <= 0 or it < args.iters:      # --iters 0 => endless (Ctrl-C)
         t0 = time.time()
-        print(f"\n=== iteration {it} ===")
         buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False)
-        losses = {}
-        losses["combat"] = agents["combat"].learn(*buf["combat"])
+        agents["combat"].learn(*buf["combat"])
         agents["combat"].learn_select(*buf["cselect"])          # in-combat card selects
-        losses["card"] = agents["card"].learn(                       # 5 heads
-            buf["card"], buf["shop"], buf["event"], buf["rest"], buf["upgrade"])
-        losses["path"] = agents["path"].learn(*buf["path"])
-        wr = report(stats)
-        print(f"   losses {({k: round(v,3) for k,v in losses.items()})}  "
-              f"iter {time.time()-t0:.1f}s")
+        agents["card"].learn(buf["card"], buf["shop"], buf["event"], buf["rest"], buf["upgrade"])
+        agents["path"].learn(*buf["path"])
+        wr = report(stats, it=it, secs=time.time() - t0, best=best)
         for name in agents:
             agents[name].save(f"{args.out}.{name}.pt")
         if wr >= 0.80:
-            print(f"\n*** reached {wr*100:.0f}% combat win rate ***")
+            print(f" {_BOLD}*** reached {wr*100:.0f}% combat win rate ***{_RESET}")
         it += 1
 
 
