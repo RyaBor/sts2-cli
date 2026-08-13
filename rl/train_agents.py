@@ -87,7 +87,34 @@ def _log_failure(path, eng, char, reason, res=None):
         pass
 
 
-def collect(agents, characters, n_runs, base_seed, greedy, faillog=None):
+def _log_run(runlog, it, i, char, seed, res):
+    """Append a compact record of one run (outcome + decision trace) so Ctrl-C leaves
+    a readable trail of what happened. Not a full replay record (see faillog)."""
+    if not runlog:
+        return
+    try:
+        combats = res.get("combats") or []
+        rec = {"it": it, "run": i, "char": char, "seed": seed,
+               "win": bool(res.get("victory")), "act": res.get("act"), "floor": res.get("floor"),
+               "combats": f"{sum(1 for c in combats if c.get('won'))}/{len(combats)}",
+               "tiers": [c.get("tier") for c in combats],
+               "end": res.get("end_reason"), "last": res.get("last_decision"),
+               "events": len(res.get("event_samples") or []), "rest": res.get("rest_choices"),
+               "trace": res.get("trace")}
+        with open(runlog, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=None, it=0):
+    # Rotate the run log every 5 iterations so it stays small but still covers the
+    # recent past for post-Ctrl-C inspection.
+    if runlog and it % 5 == 0:
+        try:
+            open(runlog, "w").close()
+        except Exception:
+            pass
     """Play n_runs full runs; return (samples-per-agent, combat/victory stats)."""
     # each buffer: obs, mask, action, return
     buf = {k: [[], [], [], []] for k in
@@ -108,10 +135,13 @@ def collect(agents, characters, n_runs, base_seed, greedy, faillog=None):
         except EngineError as ex:                       # hang (read-timeout) or dead engine
             print(col(char, f"   ! {char:11s} engine hang/died @ run{i}: {str(ex)[:50]}"))
             _log_failure(faillog, eng, char, f"engine:{str(ex)[:120]}")
+            _log_run(runlog, it, i, char, f"{base_seed}-{i}",
+                     {"end_reason": f"engine:{str(ex)[:80]}", "combats": []})
             try: eng.close()
             except Exception: pass
             continue
         eng.close()                     # normal path (eng.repro() still valid after close)
+        _log_run(runlog, it, i, char, f"{base_seed}-{i}", res)   # every run -> rolling log
         stats["runs"] += 1
         stats["victories"] += int(res["victory"])
         stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"]), float(res["act"])))
@@ -207,6 +237,8 @@ def main():
     ap.add_argument("--seed", default="az")
     ap.add_argument("--faillog", default="rl/failures.jsonl",
                     help="append replayable records for hung/errored/stuck runs (rl/replay.py)")
+    ap.add_argument("--runlog", default="rl/runs.jsonl",
+                    help="rolling per-run log (all runs); rotated every 5 iterations")
     args = ap.parse_args()
 
     chars = [c.strip() for c in args.characters.split(",") if c.strip()]
@@ -220,7 +252,8 @@ def main():
                 pass
 
     if args.eval:
-        _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True, faillog=args.faillog)
+        _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True,
+                           faillog=args.faillog, runlog=args.runlog, it=0)
         report(stats, it=0, secs=0.0, best={})
         return
 
@@ -229,7 +262,8 @@ def main():
     it = 0
     while args.iters <= 0 or it < args.iters:      # --iters 0 => endless (Ctrl-C)
         t0 = time.time()
-        buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False, faillog=args.faillog)
+        buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False,
+                             faillog=args.faillog, runlog=args.runlog, it=it)
         agents["combat"].learn(*buf["combat"])
         agents["combat"].learn_select(*buf["cselect"])          # in-combat card selects
         agents["card"].learn(buf["card"], buf["shop"], buf["event"], buf["rest"], buf["upgrade"])
