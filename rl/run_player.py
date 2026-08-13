@@ -74,6 +74,7 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
     upgrade_samples: list[tuple] = []     # (obs, mask, action)   smith upgrade target
     select_samples: list[tuple] = []      # (glob, cand_dense, cand_ids, n, action, cid)
     path_samples: list[tuple] = []        # (obs, mask, action)
+    rest_choices: dict = {}               # rest-site option_id -> count (HEAL/SMITH/...)
 
     st = eng.last
     prev_decision = None
@@ -149,7 +150,7 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
                 "card_samples": card_samples, "shop_samples": shop_samples,
                 "event_samples": event_samples, "rest_samples": rest_samples,
                 "upgrade_samples": upgrade_samples, "select_samples": select_samples,
-                "path_samples": path_samples,
+                "path_samples": path_samples, "rest_choices": rest_choices,
                 "end_reason": "game_over", "last_decision": prev_decision, "trace": trace,
             }
 
@@ -230,6 +231,8 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
             a = agents["card"].act_rest(obs, mask, greedy)
             rest_samples.append((obs, mask, a))
             a = min(a, len(opts) - 1)
+            oid = str(opts[a].get("option_id") or opts[a].get("name") or "?").upper()
+            rest_choices[oid] = rest_choices.get(oid, 0) + 1     # track heal vs smith etc.
             st = eng.act("choose_option", option_index=opts[a]["index"])
 
         elif dec == "card_select":
@@ -264,5 +267,5 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
             "card_samples": card_samples, "shop_samples": shop_samples,
             "event_samples": event_samples, "rest_samples": rest_samples,
             "upgrade_samples": upgrade_samples, "select_samples": select_samples,
-            "path_samples": path_samples,
+            "path_samples": path_samples, "rest_choices": rest_choices,
             "end_reason": end_reason, "last_decision": prev_decision, "trace": trace}

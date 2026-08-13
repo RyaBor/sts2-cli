@@ -39,6 +39,7 @@ class Engine:
                 f"Engine not built: {dll}\nRun: dotnet build src/Sts2Headless/Sts2Headless.csproj")
         self.character = character
         self.ascension = ascension
+        self.seed = seed or "rl"
         self.proc = subprocess.Popen(
             ["dotnet", dll],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -53,13 +54,21 @@ class Engine:
         self.read_timeout = float(os.environ.get("STS2_READ_TIMEOUT", "60"))
         self._EOF = object()
         self._q: "queue.Queue[Any]" = queue.Queue()
+        self.action_log: list[dict] = []       # every command sent this run (for replay)
         threading.Thread(target=self._drain_stderr, daemon=True).start()
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         self._read()  # {"type":"ready"}
         st = self.send({"cmd": "start_run", "character": character,
-                        "seed": seed or "rl", "ascension": ascension})
+                        "seed": self.seed, "ascension": ascension})
         if st.get("type") == "error":
             raise EngineError(f"start_run failed: {st.get('message')}")
+        self.action_log.clear()                # keep only the run's actions (not start_run)
+
+    def repro(self) -> dict[str, Any]:
+        """A record that deterministically replays this run: same seed + the exact
+        command sequence. See rl/replay.py."""
+        return {"character": self.character, "seed": self.seed,
+                "ascension": self.ascension, "actions": list(self.action_log)}
 
     # ---------------- plumbing ----------------
 
@@ -102,6 +111,7 @@ class Engine:
     def send(self, cmd: dict[str, Any]) -> dict[str, Any]:
         if self.proc.poll() is not None:
             raise EngineError("engine process is dead")
+        self.action_log.append(cmd)            # record for failure replay
         self.proc.stdin.write(json.dumps(cmd) + "\n")
         self.proc.stdin.flush()
         st = self._read()

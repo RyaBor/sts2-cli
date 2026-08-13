@@ -16,6 +16,7 @@ The engine must be built (dotnet build src/Sts2Headless/Sts2Headless.csproj).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -69,14 +70,32 @@ def hp_retained(c: dict) -> float:
     return c["end_hp"] / c["start_hp"] if c["start_hp"] > 0 else 0.0
 
 
-def collect(agents, characters, n_runs, base_seed, greedy):
+def _log_failure(path, eng, char, reason, res=None):
+    """Append a replayable failure record (seed + exact action sequence + trace)."""
+    if not path:
+        return
+    try:
+        rec = eng.repro()
+        rec["char"] = char
+        rec["reason"] = reason
+        rec["last_decision"] = (res or {}).get("last_decision")
+        rec["trace"] = (res or {}).get("trace")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+        print(f"     ↳ logged failure to {path} (seed {rec.get('seed')}) — replay: python rl/replay.py")
+    except Exception:
+        pass
+
+
+def collect(agents, characters, n_runs, base_seed, greedy, faillog=None):
     """Play n_runs full runs; return (samples-per-agent, combat/victory stats)."""
     # each buffer: obs, mask, action, return
     buf = {k: [[], [], [], []] for k in
            ("card", "shop", "event", "rest", "upgrade", "path")}
     buf["combat"] = [[], [], [], [], []]      # dense, card_ids, mask, action, return
     buf["cselect"] = [[], [], [], [], [], []]  # glob, cand_dense, cand_ids, n, action, return
-    stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": [], "events": 0}
+    stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": [], "events": 0,
+             "rest": defaultdict(int)}
     for i in range(n_runs):
         char = characters[i % len(characters)]
         try:
@@ -86,8 +105,13 @@ def collect(agents, characters, n_runs, base_seed, greedy):
             continue
         try:
             res = play_run(eng, agents, greedy=greedy)
-        finally:
-            eng.close()
+        except EngineError as ex:                       # hang (read-timeout) or dead engine
+            print(col(char, f"   ! {char:11s} engine hang/died @ run{i}: {str(ex)[:50]}"))
+            _log_failure(faillog, eng, char, f"engine:{str(ex)[:120]}")
+            try: eng.close()
+            except Exception: pass
+            continue
+        eng.close()                     # normal path (eng.repro() still valid after close)
         stats["runs"] += 1
         stats["victories"] += int(res["victory"])
         stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"]), float(res["act"])))
@@ -111,11 +135,14 @@ def collect(agents, characters, n_runs, base_seed, greedy):
         for c in res["combats"]:
             stats["combats"].append((char, c["tier"], c["won"], hp_retained(c)))
         stats["events"] += len(res.get("event_samples") or [])
+        for oid, cnt in (res.get("rest_choices") or {}).items():
+            stats["rest"][oid] += cnt
         # Only surface ABNORMAL runs (no combats / error / stuck) — the per-iteration
         # summary covers everything else, keeping the log readable.
         er = res.get("end_reason", "")
         if len(res["combats"]) == 0 or er.startswith(("error", "stuck")):
             print(col(char, f"   ! {char:11s} {er} @ {res.get('last_decision')}"))
+            _log_failure(faillog, eng, char, er, res)
     return buf, stats
 
 
@@ -157,6 +184,11 @@ def report(stats, it=0, secs=0.0, best=None):
     print(f" floor {avg_floor:4.1f} (best {best['floor']:.0f})       HP kept {hp*100:.0f}%")
     print(f" fights  normal {tc('COMBAT')}   elite {tc('ELITE')}   boss {tc('BOSS')}"
           f"      events {stats.get('events', 0)}")
+    rest = stats.get("rest") or {}
+    rtot = sum(rest.values())
+    other = rtot - rest.get("HEAL", 0) - rest.get("SMITH", 0)
+    print(f" rests   {rtot}   heal {rest.get('HEAL', 0)}  smith(upgrade) {rest.get('SMITH', 0)}"
+          + (f"  other {other}" if other else ""))
     if chars:
         print(f" reached {chars}")
     return combat_wr
@@ -173,6 +205,8 @@ def main():
     ap.add_argument("--resume", default=None)
     ap.add_argument("--eval", action="store_true", help="greedy play + win-rate only (no training)")
     ap.add_argument("--seed", default="az")
+    ap.add_argument("--faillog", default="rl/failures.jsonl",
+                    help="append replayable records for hung/errored/stuck runs (rl/replay.py)")
     args = ap.parse_args()
 
     chars = [c.strip() for c in args.characters.split(",") if c.strip()]
@@ -186,7 +220,7 @@ def main():
                 pass
 
     if args.eval:
-        _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True)
+        _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True, faillog=args.faillog)
         report(stats, it=0, secs=0.0, best={})
         return
 
@@ -195,7 +229,7 @@ def main():
     it = 0
     while args.iters <= 0 or it < args.iters:      # --iters 0 => endless (Ctrl-C)
         t0 = time.time()
-        buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False)
+        buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False, faillog=args.faillog)
         agents["combat"].learn(*buf["combat"])
         agents["combat"].learn_select(*buf["cselect"])          # in-combat card selects
         agents["card"].learn(buf["card"], buf["shop"], buf["event"], buf["rest"], buf["upgrade"])
