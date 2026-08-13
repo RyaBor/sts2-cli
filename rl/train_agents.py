@@ -21,6 +21,7 @@ import os
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,7 +108,33 @@ def _log_run(runlog, it, i, char, seed, res):
         pass
 
 
-def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=None, it=0):
+def _play_one(agents, char, seed, greedy):
+    """Play a single run in its own engine process. Returns a result dict the main
+    thread aggregates. Runs on a worker thread; only reads the shared agents (torch
+    CPU forward + numpy sampling are safe to call concurrently — each run records the
+    action it actually took, so its training tuples stay self-consistent)."""
+    try:
+        eng = Engine(character=char, seed=seed, ascension=10)
+    except EngineError as e:
+        return {"char": char, "seed": seed, "kind": "start_fail", "err": str(e)}
+    try:
+        res = play_run(eng, agents, greedy=greedy)
+    except EngineError as ex:                # hang (read-timeout) or dead engine
+        try: eng.close()
+        except Exception: pass
+        return {"char": char, "seed": seed, "kind": "engine", "err": str(ex), "eng": eng}
+    try: eng.close()                         # normal path (eng.repro() still valid after close)
+    except Exception: pass
+    return {"char": char, "seed": seed, "kind": "ok", "res": res, "eng": eng}
+
+
+def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=None,
+            it=0, workers=1):
+    """Play n_runs full runs (across `workers` parallel engine processes) and return
+    (samples-per-agent, combat/victory stats). Each run is an independent subprocess,
+    so collection — the wall-clock bottleneck — scales ~linearly with cores. The learn
+    step stays serial in the caller; aggregation here runs on the main thread in run
+    order, so results are order-deterministic regardless of finish order."""
     # Rotate the run log every 5 iterations so it stays small but still covers the
     # recent past for post-Ctrl-C inspection.
     if runlog and it % 5 == 0:
@@ -115,7 +142,6 @@ def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=
             open(runlog, "w").close()
         except Exception:
             pass
-    """Play n_runs full runs; return (samples-per-agent, combat/victory stats)."""
     # each buffer: obs, mask, action, return
     buf = {k: [[], [], [], []] for k in
            ("card", "shop", "event", "rest", "upgrade", "path")}
@@ -123,31 +149,42 @@ def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=
     buf["cselect"] = [[], [], [], [], [], []]  # glob, cand_dense, cand_ids, n, action, return
     stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": [], "events": 0,
              "rest": defaultdict(int)}
+
+    # ---- collect runs in parallel ----
+    results: list = [None] * n_runs
+    seeds = [f"{base_seed}-{i}" for i in range(n_runs)]
+    chars = [characters[i % len(characters)] for i in range(n_runs)]
+    ex = ThreadPoolExecutor(max_workers=max(1, workers))
+    try:
+        futs = {ex.submit(_play_one, agents, chars[i], seeds[i], greedy): i
+                for i in range(n_runs)}
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
+    except KeyboardInterrupt:
+        # Parallel mode can't cleanly dump every in-flight run; cancel what's pending
+        # and re-raise. Hung runs still self-log via play_run's watchdog -> EngineError.
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        ex.shutdown(wait=True)
+
+    # ---- aggregate on the main thread, in run order (deterministic) ----
     for i in range(n_runs):
-        char = characters[i % len(characters)]
-        try:
-            eng = Engine(character=char, seed=f"{base_seed}-{i}", ascension=10)
-        except EngineError as e:
-            print(f"  [skip {char}] engine start failed: {e}")
+        r = results[i]
+        if r is None:
             continue
-        try:
-            res = play_run(eng, agents, greedy=greedy)
-        except EngineError as ex:                       # hang (read-timeout) or dead engine
-            print(col(char, f"   ! {char:11s} engine hang/died @ run{i}: {str(ex)[:50]}"))
-            _log_failure(faillog, eng, char, f"engine:{str(ex)[:120]}")
-            _log_run(runlog, it, i, char, f"{base_seed}-{i}",
-                     {"end_reason": f"engine:{str(ex)[:80]}", "combats": []})
-            try: eng.close()
-            except Exception: pass
+        char, seed = r["char"], r["seed"]
+        if r["kind"] == "start_fail":
+            print(f"  [skip {char}] engine start failed: {r['err']}")
             continue
-        except KeyboardInterrupt:                        # Ctrl-C on a stuck run -> capture it
-            print(f"\n[Ctrl-C] capturing in-flight run {char} (seed {base_seed}-{i}) for replay")
-            _log_failure(faillog, eng, char, "ctrl-c (hang?)")   # dumps action_log so far
-            try: eng.close()
-            except Exception: pass
-            raise
-        eng.close()                     # normal path (eng.repro() still valid after close)
-        _log_run(runlog, it, i, char, f"{base_seed}-{i}", res)   # every run -> rolling log
+        if r["kind"] == "engine":
+            print(col(char, f"   ! {char:11s} engine hang/died @ run{i}: {r['err'][:50]}"))
+            _log_failure(faillog, r["eng"], char, f"engine:{r['err'][:120]}")
+            _log_run(runlog, it, i, char, seed,
+                     {"end_reason": f"engine:{r['err'][:80]}", "combats": []})
+            continue
+        res, eng = r["res"], r["eng"]
+        _log_run(runlog, it, i, char, seed, res)         # every run -> rolling log
         stats["runs"] += 1
         stats["victories"] += int(res["victory"])
         stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"]), float(res["act"])))
@@ -155,14 +192,14 @@ def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=
         for (dense, ids, mask, a, cid) in res["combat_samples"]:
             if cid < 0:
                 continue
-            r = hp_retained(res["combats"][cid])
+            r2 = hp_retained(res["combats"][cid])
             buf["combat"][0].append(dense); buf["combat"][1].append(ids)
-            buf["combat"][2].append(mask); buf["combat"][3].append(a); buf["combat"][4].append(r)
+            buf["combat"][2].append(mask); buf["combat"][3].append(a); buf["combat"][4].append(r2)
         for (glob, cd, ci, n, a, cid) in res["select_samples"]:   # in-combat card selects
             if cid < 0:
                 continue
-            r = hp_retained(res["combats"][cid])
-            for j, val in enumerate((glob, cd, ci, n, a, r)):
+            r2 = hp_retained(res["combats"][cid])
+            for j, val in enumerate((glob, cd, ci, n, a, r2)):
                 buf["cselect"][j].append(val)
         for key in ("card", "shop", "event", "rest", "upgrade", "path"):  # rewarded by victory (rr)
             for (obs, mask, a) in res[f"{key}_samples"]:
@@ -235,6 +272,9 @@ def main():
     ap.add_argument("--iters", type=int, default=0,
                     help="training iterations; 0 = run endlessly until Ctrl-C")
     ap.add_argument("--runs", type=int, default=10, help="runs collected per iteration")
+    ap.add_argument("--workers", type=int, default=min(6, os.cpu_count() or 4),
+                    help="parallel engine processes for run collection (set to physical "
+                         "core count; each run is a single-threaded engine subprocess)")
     ap.add_argument("--characters", default=",".join(CHARACTERS))
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="rl/az_ckpt")
@@ -259,7 +299,7 @@ def main():
 
     if args.eval:
         _, stats = collect(agents, chars, args.runs, f"{args.seed}-eval", greedy=True,
-                           faillog=args.faillog, runlog=args.runlog, it=0)
+                           faillog=args.faillog, runlog=args.runlog, it=0, workers=args.workers)
         report(stats, it=0, secs=0.0, best={})
         return
 
@@ -269,7 +309,7 @@ def main():
     while args.iters <= 0 or it < args.iters:      # --iters 0 => endless (Ctrl-C)
         t0 = time.time()
         buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False,
-                             faillog=args.faillog, runlog=args.runlog, it=it)
+                             faillog=args.faillog, runlog=args.runlog, it=it, workers=args.workers)
         agents["combat"].learn(*buf["combat"])
         agents["combat"].learn_select(*buf["cselect"])          # in-combat card selects
         agents["card"].learn(buf["card"], buf["shop"], buf["event"], buf["rest"], buf["upgrade"])

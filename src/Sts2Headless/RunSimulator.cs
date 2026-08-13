@@ -3126,6 +3126,12 @@ public class RunSimulator
             ["player_powers"] = playerPowers?.Count > 0 ? playerPowers : null,
             ["draw_pile_count"] = pcs?.DrawPile?.Cards?.Count ?? 0,
             ["discard_pile_count"] = pcs?.DiscardPile?.Cards?.Count ?? 0,
+            // Pile COMPOSITION (multisets) so the combat agent can reason about what's left
+            // to draw and what it has cycled/exhausted — public info a real player always has.
+            // draw is sorted so the hidden draw ORDER never leaks; only the set is exposed.
+            ["draw_pile"] = pcs?.DrawPile?.Cards?.Select(c => c.Id.Entry).OrderBy(s => s).ToList(),
+            ["discard_pile"] = pcs?.DiscardPile?.Cards?.Select(c => c.Id.Entry).ToList(),
+            ["exhaust_pile"] = pcs?.ExhaustPile?.Cards?.Select(c => c.Id.Entry).ToList(),
         };
 
         // Character-specific mechanics

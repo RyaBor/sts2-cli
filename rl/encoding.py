@@ -75,9 +75,15 @@ CARD_SCALARS = 13   # 11 base + upgrade_level + enchant_amount
 CARD_DENSE = CARD_SCALARS + CARD_STATS_HASH + CARD_KW_HASH + CARD_ENCH_HASH   # per-slot dense
 EMBED_DIM = 32
 PAD_CARD = CARD_VOCAB_SIZE          # embedding padding index for empty hand slots
+# Draw / discard / exhaust pile COMPOSITION: a count-vector (multiset) over the card
+# vocab per pile. Order is hidden (draw is unknowable, and we don't encode order anyway),
+# but the *set* of cards left to draw / already cycled / exhausted is public info a real
+# player uses constantly — so the combat agent sees it, like the card agent sees the deck.
+N_PILES = 3                          # draw, discard, exhaust
 DENSE_DIM = (GLOBAL_FEATS + POWER_HASH + MAX_ENEMIES * ENEMY_FEATS
              + MAX_HAND * CARD_DENSE + MAX_POTIONS * POTION_FEATS
-             + MAX_ORBS * ORB_FEATS + OSTY_FEATS + RELIC_HASH)
+             + MAX_ORBS * ORB_FEATS + OSTY_FEATS + RELIC_HASH
+             + N_PILES * CARD_VOCAB_SIZE)
 
 
 def _potions(st: dict) -> list:
@@ -355,6 +361,14 @@ def encode_combat(st: dict):
         if nm:
             out[i + _bucket(str(nm), RELIC_HASH)] = 1.0
     i += RELIC_HASH
+
+    # draw / discard / exhaust pile composition — a count-vector (multiset) per pile over
+    # the card vocab. Order is not encoded (draw order is hidden); only which cards, and how
+    # many, are in each pile. Lets the agent reason about remaining draws and deck cycling.
+    for ids in (st.get("draw_pile"), st.get("discard_pile"), st.get("exhaust_pile")):
+        for cid in (ids or []):
+            out[i + _card_index(cid)] += 0.1        # count / 10, like the other count features
+        i += CARD_VOCAB_SIZE
 
     return out, card_ids
 
