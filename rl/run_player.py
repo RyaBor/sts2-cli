@@ -240,6 +240,16 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 2000,
             ekey = str(st.get("event_name") or "")
             event_repeat = event_repeat + 1 if ekey == last_event else 0
             last_event = ekey
+            # Soft-lock escape: some events keep re-presenting the SAME options with no way
+            # to satisfy them and never reach their end page — e.g. "The Future of Potions"
+            # still offering Insert-Potion after all potions are spent (it never transitions
+            # to its DONE page). Cycling the options (below) can't advance those, so once an
+            # event has recurred many times with no progress, force-leave to the map.
+            # leave_room force-exits an event room; a forfeited event beats a stuck run. Any
+            # real progress (a card_reward / any non-event decision) resets event_repeat to 0,
+            # so genuinely multi-step events (insert several potions) never trip this.
+            if event_repeat >= 8:
+                st = eng.act("leave_room"); continue
             obs, mask = encode_event(st), event_mask(st)
             a = agents["card"].act_event(obs, mask, greedy)
             a = min(a, len(opts) - 1)
