@@ -16,7 +16,8 @@ import torch
 import torch.nn as nn
 
 from encoding import (N_ACTIONS, DENSE_DIM, EMBED_DIM, CARD_VOCAB_SIZE, PAD_CARD,
-                      MAX_HAND, CARD_DENSE, SEL_GLOBAL, MAX_SEL,
+                      MAX_HAND, CARD_DENSE, CARD_ENCH_HASH, SEL_GLOBAL, MAX_SEL,
+                      _card_index, _write_card_dense,
                       encode_combat, encode_select, action_mask, decode_action)  # noqa: F401
 import torch.nn.functional as F
 
@@ -26,11 +27,23 @@ def _bucket(s, n: int) -> int:
 
 
 # ── card-reward encoding ───────────────────────────────────────────────────
-MAX_OFFER = 4
-CARD_HASH = 48
-CARD_FEATS = 6 + CARD_HASH
-CS_GLOBAL = 6                       # hp, deck_size, act, floor, gold, n_offered
-CS_OBS = CS_GLOBAL + MAX_OFFER * CARD_FEATS
+# MAX_OFFER covers rewards enlarged by relics/effects (base 3, +cards from relics).
+MAX_OFFER = 6
+CARD_HASH = 256          # offered-card identity (606 cards); supplements the rich card features
+# Each offered card is encoded EXACTLY like a combat hand card (encoding._write_card_dense):
+# cost/type/resolved-damage/block + upgrade level + enchant hash&amount + keywords + effect
+# profile — so drafting sees a card's real behavior (upgraded/enchanted) the way combat does.
+# Plus an owned-count and a hashed identity.
+CARD_FEATS = CARD_DENSE + 1 + CARD_HASH   # combat-style card features + owned-count + id-hash
+# Reachable combat-tier counts from the current map position (fights this draft is for).
+AHEAD_ROOMS = ("MONSTER", "ELITE", "BOSS", "SHOP", "RESTSITE", "TREASURE")
+# Deck makeup: 4 type tallies + upgraded/enchanted/afflicted tallies, then TWO collision-free
+# count vectors over the 606-card vocab — all copies, and upgraded copies (so upgraded vs base
+# copies are distinguishable per card) — then an enchant-type hash (which enchants/afflictions
+# the deck carries, and how many). Handles clones / duplicated decks.
+DECK_FEATS = 7 + 2 * CARD_VOCAB_SIZE + CARD_ENCH_HASH
+CS_GLOBAL = 6 + len(AHEAD_ROOMS)    # hp, deck_size, act, floor, gold, n_offered + ahead tiers
+CS_OBS = CS_GLOBAL + MAX_OFFER * CARD_FEATS + DECK_FEATS
 CS_ACTIONS = MAX_OFFER + 1          # pick offered card i, or SKIP (last)
 
 
@@ -38,9 +51,18 @@ def _ctx(state, key, default=0):
     return (state.get("context") or {}).get(key) or state.get(key) or default
 
 
+def _card_key(c) -> str:
+    return str(c.get("id") or c.get("name") or "")
+
+
 def encode_card_reward(state) -> np.ndarray:
     out = np.zeros(CS_OBS, np.float32)
     p = state.get("player") or {}
+    deck = p.get("deck") or []
+    # count how many of each card id we already own (for duplicate awareness)
+    owned = {}
+    for dc in deck:
+        owned[_card_key(dc)] = owned.get(_card_key(dc), 0) + 1
     out[0] = float(p.get("hp") or 0) / max(float(p.get("max_hp") or 1), 1)
     out[1] = float(p.get("deck_size") or 0) / 40.0
     out[2] = float(_ctx(state, "act", 1)) / 3.0
@@ -48,17 +70,49 @@ def encode_card_reward(state) -> np.ndarray:
     out[4] = float(p.get("gold") or 0) / 300.0       # gold-aware drafting
     cards = state.get("cards") or []
     out[5] = len(cards) / MAX_OFFER
+    # reachable combat-tier counts this act (draft for the elites/bosses/normals ahead)
+    ahead = {str(k).upper(): v for k, v in (state.get("ahead") or {}).items()}
+    for j, room in enumerate(AHEAD_ROOMS):
+        out[6 + j] = float(ahead.get(room, 0)) / 5.0        # not capped: 15 monsters ≠ 5
     for i, c in enumerate(cards[:MAX_OFFER]):
         b = CS_GLOBAL + i * CARD_FEATS
-        stats = c.get("stats") or {}
-        t = str(c.get("type") or "")
-        out[b + 0] = 1.0
-        out[b + 1] = float(c.get("cost") or 0) / 3.0
-        out[b + 2] = 1.0 if t == "Attack" else 0.0
-        out[b + 3] = 1.0 if t == "Skill" else 0.0
-        out[b + 4] = 1.0 if t == "Power" else 0.0
-        out[b + 5] = (float(stats.get("damage") or 0) + float(stats.get("block") or 0)) / 30.0
-        out[b + 6 + _bucket(c.get("id") or c.get("name") or "", CARD_HASH)] = 1.0
+        _write_card_dense(c, out, b)                              # combat-style card features
+        out[b + CARD_DENSE] = min(owned.get(_card_key(c), 0), 3) / 3.0      # already own N of this
+        out[b + CARD_DENSE + 1 + _bucket(_card_key(c), CARD_HASH)] = 1.0    # hashed identity
+    # ── current deck composition (what's already in the deck) ──
+    db = CS_GLOBAL + MAX_OFFER * CARD_FEATS
+    base_b = db + 7                          # all-copies count vector
+    upg_b = base_b + CARD_VOCAB_SIZE         # upgraded-copies count vector
+    ench_b = upg_b + CARD_VOCAB_SIZE         # enchant/affliction TYPE count hash
+    na = ns = npw = ncs = nup = nen = naf = 0
+    for dc in deck:
+        dt = str(dc.get("type") or "")
+        if dt == "Attack": na += 1
+        elif dt == "Skill": ns += 1
+        elif dt == "Power": npw += 1
+        elif dt in ("Curse", "Status"): ncs += 1
+        idx = _card_index(dc.get("id") or dc.get("name"))
+        out[base_b + idx] += 1.0                              # every copy
+        if dc.get("upgraded"):
+            nup += 1
+            out[upg_b + idx] += 1.0                           # upgraded copies (distinguishable)
+        ench, aff = dc.get("enchantment"), dc.get("affliction")
+        if ench: nen += 1
+        if aff: naf += 1
+        for tag in (ench, aff):                               # which enchant/affliction types
+            if tag:
+                out[ench_b + _bucket(str(tag), CARD_ENCH_HASH)] += 1.0
+    out[db + 0] = na / 20.0
+    out[db + 1] = ns / 20.0
+    out[db + 2] = npw / 10.0
+    out[db + 3] = ncs / 10.0
+    out[db + 4] = nup / 20.0        # aggregate: cards upgraded
+    out[db + 5] = nen / 10.0        # aggregate: cards enchanted
+    out[db + 6] = naf / 10.0        # aggregate: cards afflicted
+    # scale counts (NOT clipped, so 20 copies ≠ 10): a copy is ~1/10, an enchant type ~1/5
+    out[base_b:base_b + CARD_VOCAB_SIZE] /= 10.0
+    out[upg_b:upg_b + CARD_VOCAB_SIZE] /= 10.0
+    out[ench_b:ench_b + CARD_ENCH_HASH] /= 5.0
     return out
 
 
@@ -75,7 +129,9 @@ MAX_PATHS = 6
 # Must match the engine's MapPointType.ToString() (see RunSimulator map choices):
 # Monster, Elite, Boss, Shop, Treasure, RestSite, Ancient, Unknown/Unassigned.
 ROOMS = ["MONSTER", "ELITE", "BOSS", "SHOP", "TREASURE", "RESTSITE", "ANCIENT", "UNKNOWN"]
-PATH_FEATS = len(ROOMS) + 1
+# Per choice: present + immediate-type one-hot + downstream reachable-type counts
+# (what taking this branch leads to, all the way to the boss).
+PATH_FEATS = 1 + len(ROOMS) + len(ROOMS)
 PS_GLOBAL = 4                      # hp, act, gold, n_choices
 PS_OBS = PS_GLOBAL + MAX_PATHS * PATH_FEATS
 PS_ACTIONS = MAX_PATHS
@@ -102,6 +158,12 @@ def encode_map(state) -> np.ndarray:
         out[b] = 1.0
         rt = _room_type(c)
         out[b + 1 + (ROOMS.index(rt) if rt in ROOMS else len(ROOMS) - 1)] = 1.0
+        # downstream: how many of each room type this branch can reach (to the boss)
+        rb = b + 1 + len(ROOMS)
+        for k, v in (c.get("reach") or {}).items():
+            ku = str(k).upper()
+            idx = ROOMS.index(ku) if ku in ROOMS else len(ROOMS) - 1
+            out[rb + idx] = min(float(v) / 5.0, 1.0)
     return out
 
 

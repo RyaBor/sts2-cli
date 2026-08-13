@@ -2624,6 +2624,8 @@ public class RunSimulator
                     ["cost"] = cr.Card.EnergyCost?.GetResolved() ?? 0,
                     ["type"] = cr.Card.Type.ToString(),
                     ["rarity"] = cr.Card.Rarity.ToString(),
+                    ["upgraded"] = cr.Card.IsUpgraded,
+                    ["upgrade_level"] = cr.Card.CurrentUpgradeLevel,
                     ["description"] = _loc.Bilingual("cards", cr.Card.Id.Entry + ".description"),
                     ["stats"] = stats.Count > 0 ? stats : null,
                     ["keywords"] = rrkws?.Count > 0 ? rrkws : null,
@@ -2639,6 +2641,7 @@ public class RunSimulator
                 ["cards"] = cards,
                 ["can_skip"] = true,
                 ["from_event"] = true,
+                ["ahead"] = AheadTypeCounts(),
                 ["player"] = PlayerSummary(_runState!.Players[0]),
             };
         }
@@ -2768,6 +2771,65 @@ public class RunSimulator
         };
     }
 
+    /// <summary>Build a map-choice dict including `reach`: how many of each room type
+    /// are reachable from this node onward to the boss (BFS over children). Lets the path
+    /// agent see the whole path ahead — what a branch leads to — not just the next node.</summary>
+    private Dictionary<string, object?> MakeMapChoice(MapPoint pt)
+    {
+        var reach = new Dictionary<string, int>();
+        var seen = new HashSet<(int, int)>();
+        var stack = new Stack<MapPoint>();
+        stack.Push(pt);
+        while (stack.Count > 0)
+        {
+            var q = stack.Pop();
+            if (q == null) continue;
+            var k = ((int)q.coord.col, (int)q.coord.row);
+            if (!seen.Add(k)) continue;
+            var t = q.PointType.ToString();
+            reach[t] = reach.TryGetValue(t, out var v) ? v + 1 : 1;
+            if (q.Children != null)
+                foreach (var ch in q.Children) stack.Push(ch);
+        }
+        return new Dictionary<string, object?>
+        {
+            ["col"] = (int)pt.coord.col,
+            ["row"] = (int)pt.coord.row,
+            ["type"] = pt.PointType.ToString(),
+            ["reach"] = reach,
+        };
+    }
+
+    /// <summary>Room-type counts reachable from the CURRENT map position onward to the
+    /// boss (elite/boss/normal/shop/rest/…). Lets any decision — card rewards especially —
+    /// draft/plan for the fights ahead this act. Empty if position/map unavailable.</summary>
+    private Dictionary<string, int> AheadTypeCounts()
+    {
+        var counts = new Dictionary<string, int>();
+        try
+        {
+            var map = _runState?.Map;
+            var cc = _runState?.CurrentMapCoord;
+            if (map == null || cc == null) return counts;
+            var cur = map.GetPoint(cc.Value);
+            var seen = new HashSet<(int, int)>();
+            var stack = new Stack<MapPoint>();
+            foreach (var r in (cur?.Children ?? Enumerable.Empty<MapPoint>())) stack.Push(r);
+            while (stack.Count > 0)
+            {
+                var q = stack.Pop();
+                if (q == null) continue;
+                var k = ((int)q.coord.col, (int)q.coord.row);
+                if (!seen.Add(k)) continue;
+                var t = q.PointType.ToString();
+                counts[t] = counts.TryGetValue(t, out var v) ? v + 1 : 1;
+                if (q.Children != null) foreach (var ch in q.Children) stack.Push(ch);
+            }
+        }
+        catch { }
+        return counts;
+    }
+
     private Dictionary<string, object?> MapSelectState()
     {
         var map = _runState?.Map;
@@ -2800,27 +2862,13 @@ public class RunSimulator
                 choices = new List<Dictionary<string, object?>>();
                 var sp = map.StartingMapPoint;
                 if (sp?.Children != null)
-                {
                     foreach (var child in sp.Children)
-                    {
-                        choices.Add(new Dictionary<string, object?>
-                        {
-                            ["col"] = (int)child.coord.col,
-                            ["row"] = (int)child.coord.row,
-                            ["type"] = child.PointType.ToString(),
-                        });
-                    }
-                }
+                        choices.Add(MakeMapChoice(child));
             }
             else
             {
                 choices = (currentPoint.Children ?? Enumerable.Empty<MapPoint>())
-                    .Select(child => new Dictionary<string, object?>
-                    {
-                        ["col"] = (int)child.coord.col,
-                        ["row"] = (int)child.coord.row,
-                        ["type"] = child.PointType.ToString(),
-                    })
+                    .Select(MakeMapChoice)
                     .ToList();
             }
         }
@@ -2828,28 +2876,11 @@ public class RunSimulator
         {
             // Starting point — pick from starting row
             var startPoint = map.StartingMapPoint;
-            choices = new List<Dictionary<string, object?>>
-            {
-                new()
-                {
-                    ["col"] = (int)startPoint.coord.col,
-                    ["row"] = (int)startPoint.coord.row,
-                    ["type"] = startPoint.PointType.ToString(),
-                }
-            };
+            choices = new List<Dictionary<string, object?>> { MakeMapChoice(startPoint) };
             // Add all children of start point as well since we can travel to them
             if (startPoint.Children != null)
-            {
                 foreach (var child in startPoint.Children)
-                {
-                    choices.Add(new Dictionary<string, object?>
-                    {
-                        ["col"] = (int)child.coord.col,
-                        ["row"] = (int)child.coord.row,
-                        ["type"] = child.PointType.ToString(),
-                    });
-                }
-            }
+                    choices.Add(MakeMapChoice(child));
         }
 
         return new Dictionary<string, object?>
@@ -3308,6 +3339,8 @@ public class RunSimulator
                 ["cost"] = c.EnergyCost?.GetResolved() ?? 0,
                 ["type"] = c.Type.ToString(),
                 ["rarity"] = c.Rarity.ToString(),
+                ["upgraded"] = c.IsUpgraded,
+                ["upgrade_level"] = c.CurrentUpgradeLevel,
                 ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
                 ["stats"] = stats.Count > 0 ? stats : null,
                 ["keywords"] = crkws?.Count > 0 ? crkws : null,
@@ -3323,6 +3356,7 @@ public class RunSimulator
             ["cards"] = cards,
             ["can_skip"] = _pendingCardReward.CanSkip,
             ["gold_earned"] = _runState!.Players[0].Gold - _goldBeforeCombat,
+            ["ahead"] = AheadTypeCounts(),      // upcoming room types this act (elite/boss/normal/...)
             ["player"] = PlayerSummary(_runState!.Players[0]),
         };
     }

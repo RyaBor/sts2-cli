@@ -82,11 +82,13 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
     trace: list[str] = []                 # decision sequence, for diagnosing dead runs
     end_reason = "max_steps"              # overwritten at the real exit
     consec_err = 0                        # consecutive engine errors, for graceful recovery
+    last_event, event_repeat = None, 0    # detect an event that keeps re-presenting (loop guard)
 
     def in_combat_start(state):
         nonlocal cur_combat
         combats.append({"tier": _tier_from_state(state),
                         "start_hp": float((state.get("player") or {}).get("hp") or 0),
+                        "start_max_hp": float((state.get("player") or {}).get("max_hp") or 1),
                         "end_hp": 0.0, "won": False})
         cur_combat = len(combats) - 1
 
@@ -113,6 +115,8 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
         consec_err = 0
         dec = st.get("decision", "")
         trace.append(dec)
+        if dec != "event_choice":
+            last_event, event_repeat = None, 0
 
         # combat boundary bookkeeping: open a fight on the first combat_play, and
         # only close it (as won) when we reach a real post-combat screen. Staying
@@ -190,15 +194,32 @@ def play_run(eng, agents: dict, greedy: bool = False, max_steps: int = 4000) -> 
                     st = nxt if (nxt and nxt.get("type") != "error") else eng.act("leave_room")
                     break
                 st = nxt
+            else:
+                # Hit the buy cap without leaving (greedy kept buying / re-picking) —
+                # force-leave so we never re-enter the shop forever. Shops have a valid
+                # leave_room (unlike exit-less events).
+                st = eng.act("leave_room")
 
         elif dec == "event_choice":                   # events AND ancient nodes
             opts = st.get("options") or []
             if not opts:
                 st = eng.act("leave_room"); continue
+            ekey = str(st.get("event_name") or "")
+            event_repeat = event_repeat + 1 if ekey == last_event else 0
+            last_event = ekey
             obs, mask = encode_event(st), event_mask(st)
             a = agents["card"].act_event(obs, mask, greedy)
-            event_samples.append((obs, mask, a))
             a = min(a, len(opts) - 1)
+            # Loop guard: some events re-present the same page when a non-exit option is
+            # chosen (e.g. Jungle Maze "Join Forces"), and a greedy policy re-picks it
+            # forever. Events have NO leave — you must choose an option — so once an event
+            # keeps recurring we cycle through the OTHER legal options (the picked one is
+            # the known looper) until one advances. The stuck-guard is the final backstop.
+            if event_repeat >= 2:
+                legal = [i for i, o in enumerate(opts) if not o.get("is_locked")] or list(range(len(opts)))
+                order = [i for i in legal if i != a] or legal
+                a = order[(event_repeat - 2) % len(order)]
+            event_samples.append((obs, mask, a))          # record the action actually taken
             st = eng.act("choose_option", option_index=opts[a]["index"])
 
         elif dec == "rest_site":                       # heal vs smith(upgrade) vs dig...

@@ -50,8 +50,17 @@ def run_reward(res: dict) -> float:
     act/floor shaping, so drafting/pathing/events get a real signal long before
     full runs are won."""
     boss_wins = sum(1 for c in res["combats"] if c["tier"] == "BOSS" and c["won"])
+    # HP-preservation: the meta heads (rest/card/path) get NO HP signal otherwise, so
+    # they never learn to heal / route safely / draft for survivability — and runs die
+    # of Act-1 attrition. Reward the average HP fraction the player carried into its
+    # fights: a run kept healthy (heal at rest, avoid bleed) scores higher than one that
+    # ground down to death at the same floor. Combat keeps its own per-fight HP reward.
+    combats = res.get("combats") or []
+    fracs = [c["start_hp"] / c["start_max_hp"] for c in combats if c.get("start_max_hp")]
+    hp_health = (sum(fracs) / len(fracs)) if fracs else 0.0
     return (1.0 * float(res["victory"])
             + 0.5 * boss_wins                       # each act boss cleared
+            + 0.3 * hp_health                       # stay healthy across the run
             + 0.15 * (float(res["act"]) - 1)
             + 0.01 * float(res["floor"]))
 

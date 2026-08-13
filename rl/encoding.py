@@ -18,13 +18,17 @@ from typing import Any
 
 import numpy as np
 
+# Hash/cap sizes are set from the ACTUAL game entity counts (localization_eng/*.json):
+# 606 cards, 284 powers, 309 relics, 64 potions, 24 enchantments + 10 afflictions,
+# 14 intents, 7 orbs, 7 keywords. Identity hashes are sized comfortably above the count
+# so distinct entities rarely collide.
 MAX_HAND = 10
 MAX_ENEMIES = 5
-MAX_POTIONS = 3
-POWER_HASH = 16
-POTION_HASH = 16
-INTENT_TYPE_HASH = 8      # enemy intent category (Attack/Defend/Buff/Debuff/...)
-RELIC_HASH = 64           # owned relics, hashed multi-hot (combat-relevant relics)
+MAX_POTIONS = 5           # belt is 3 by default but relics (Potion Belt, etc.) expand it
+POWER_HASH = 128          # 284 powers; few active at once so collisions among them are rare
+POTION_HASH = 64          # 64 potions -> ~collision-free
+INTENT_TYPE_HASH = 16     # 14 intent types -> collision-free
+RELIC_HASH = 128          # 309 relics; you hold a handful at once
 CARD_VOCAB_SIZE = 640     # fixed; ~606 real cards + an unknown tail (see _card_index)
 # A card's *behavior* changes when upgraded or enchanted while its id stays the same.
 # We capture that with a FACTORED representation: shared base identity (vocab) plus an
@@ -32,9 +36,9 @@ CARD_VOCAB_SIZE = 640     # fixed; ~606 real cards + an unknown tail (see _card_
 # damage/block/vulnerable/weak/draw/... — this is what upgrade/enchant actually change),
 # and keyword flags. So Strike / Strike+ / enchanted-Strike are distinct input vectors
 # without exploding the vocab into a slot per (card × level × enchant).
-CARD_STATS_HASH = 16      # hashed effect profile from the card's `stats` dict
-CARD_KW_HASH = 12         # keywords (Exhaust/Ethereal/Innate/Retain/... incl. upgrade-added)
-CARD_ENCH_HASH = 8        # enchantment / affliction identity (Regent/Necrobinder modifiers)
+CARD_STATS_HASH = 32      # hashed effect profile from the card's `stats` dict (~36 modifiers)
+CARD_KW_HASH = 12         # 7 keywords (Exhaust/Ethereal/Innate/Retain/...) -> collision-free
+CARD_ENCH_HASH = 48       # 24 enchantments + 10 afflictions -> collision-free
 
 # --- action layout ---
 #   [0, MAX_HAND*MAX_ENEMIES)      play card i targeting enemy j
@@ -53,9 +57,9 @@ N_ACTIONS = POTION_DISCARD + MAX_POTIONS
 # Potions that never appear as a manual action (auto-trigger on death, etc.).
 AUTO_ONLY_POTIONS = frozenset({"FAIRY_POTION", "FAIRY_IN_A_BOTTLE"})
 
-MAX_ORBS = 5           # Defect
-ORB_HASH = 8
-GLOBAL_FEATS = 9       # +stars (Regent)
+MAX_ORBS = 10          # Defect: 3 slots default, grows with Focus/relics
+ORB_HASH = 8           # 7 orb types -> collision-free
+GLOBAL_FEATS = 12      # +stars (Regent) +encounter-tier one-hot (normal/elite/boss)
 ENEMY_FEATS = 7 + POWER_HASH + INTENT_TYPE_HASH   # +intent-type multi-hot
 POTION_FEATS = 2 + POTION_HASH
 ORB_FEATS = 3 + ORB_HASH           # present, passive, evoke, type-hash
@@ -256,6 +260,11 @@ def encode_combat(st: dict):
     out[6] = float(p.get("block") or 0) / 30.0
     out[7] = max_hp / 100.0
     out[8] = float(st.get("stars") or 0) / 10.0        # Regent star economy
+    # encounter tier one-hot (normal / elite / boss) from the authoritative room type
+    rt = str((st.get("context") or {}).get("room_type") or "").upper()
+    out[9] = 1.0 if ("BOSS" not in rt and "ELITE" not in rt) else 0.0   # normal
+    out[10] = 1.0 if "ELITE" in rt else 0.0
+    out[11] = 1.0 if "BOSS" in rt else 0.0
 
     i = GLOBAL_FEATS
     out[i:i + POWER_HASH] = _powers_vec(st.get("player_powers"))

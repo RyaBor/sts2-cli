@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import threading
 from typing import Any
@@ -47,7 +48,13 @@ class Engine:
         # the engine blocks writing to it, and stops answering on stdout.
         self._stderr_tail: list[str] = []
         self.last: dict[str, Any] = {}
+        # Read stdout on a background thread into a queue so _read() can TIME OUT
+        # instead of blocking forever if the engine deadlocks internally (hang guard).
+        self.read_timeout = float(os.environ.get("STS2_READ_TIMEOUT", "60"))
+        self._EOF = object()
+        self._q: "queue.Queue[Any]" = queue.Queue()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
+        threading.Thread(target=self._drain_stdout, daemon=True).start()
         self._read()  # {"type":"ready"}
         st = self.send({"cmd": "start_run", "character": character,
                         "seed": seed or "rl", "ascension": ascension})
@@ -63,15 +70,34 @@ class Engine:
             if len(self._stderr_tail) > 40:
                 self._stderr_tail.pop(0)
 
+    def _drain_stdout(self) -> None:
+        try:
+            for line in iter(self.proc.stdout.readline, ""):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        self._q.put(json.loads(line))
+                    except Exception:
+                        pass
+        finally:
+            self._q.put(self._EOF)      # stream closed -> process exited
+
     def _read(self) -> dict[str, Any]:
-        while True:
-            line = self.proc.stdout.readline()
-            if line == "":
-                tail = "\n".join(self._stderr_tail[-15:])
-                raise EngineError(f"engine exited unexpectedly. stderr tail:\n{tail}")
-            line = line.strip()
-            if line.startswith("{"):
-                return json.loads(line)
+        try:
+            item = self._q.get(timeout=self.read_timeout)
+        except queue.Empty:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+            tail = "\n".join(self._stderr_tail[-15:])
+            raise EngineError(
+                f"engine timed out after {self.read_timeout:.0f}s (hung); killed. "
+                f"stderr tail:\n{tail}")
+        if item is self._EOF:
+            tail = "\n".join(self._stderr_tail[-15:])
+            raise EngineError(f"engine exited unexpectedly. stderr tail:\n{tail}")
+        return item
 
     def send(self, cmd: dict[str, Any]) -> dict[str, Any]:
         if self.proc.poll() is not None:
