@@ -4258,9 +4258,19 @@ public class RunSimulator
 
         public void ResolvePending(IEnumerable<CardModel> selected)
         {
-            _pendingTcs?.TrySetResult(selected);
+            // Capture and clear the pending slot BEFORE completing the TCS. This TCS has no
+            // RunContinuationsAsynchronously, so TrySetResult runs the awaiting card's OnPlay
+            // continuation INLINE — and that continuation can open a CHAINED card_select
+            // (e.g. Headbutt's discard-select whose follow-up, or an on-play/on-kill effect,
+            // opens another selection), which assigns a NEW _pendingTcs. Nulling _pendingTcs
+            // AFTER TrySetResult would clobber that new pending selection: its awaiter is then
+            // orphaned (HasPending=false) while the action executor stays parked awaiting it
+            // (IsRunning=true), so every subsequent play_card no-ops until the run times out
+            // (the timeout:combat_play hang). Clearing first preserves any chained selection.
+            var tcs = _pendingTcs;
             PendingOptions = null;
             _pendingTcs = null;
+            tcs?.TrySetResult(selected);
         }
 
         public void ResolvePendingByIndices(int[] indices)
@@ -4275,9 +4285,12 @@ public class RunSimulator
 
         public void CancelPending()
         {
-            _pendingTcs?.TrySetResult(Array.Empty<CardModel>());
+            // Same ordering rationale as ResolvePending: clear before completing so a chained
+            // selection opened by the inline continuation isn't clobbered.
+            var tcs = _pendingTcs;
             PendingOptions = null;
             _pendingTcs = null;
+            tcs?.TrySetResult(Array.Empty<CardModel>());
         }
 
         // Pending card reward from events (GetSelectedCardReward blocks until resolved)
