@@ -5,22 +5,52 @@ played through the headless CLI, for every character, and tracks **combat win ra
 
 | Agent | Decides | Reward |
 |---|---|---|
-| `combat` | play card / use potion / **discard potion** / end turn | HP retained this combat = `end_hp / start_hp` (**≥1.0 = perfect win**) |
-| `card` (two heads) | card rewards **and the shop** (buy card/relic/potion, remove card, leave) | overall **game victory** (+ small act/floor progress shaping) |
+| `combat` | play card / use potion / **discard potion** / end turn / **in-combat card selects** (Armaments, Dual Wield, Exhume, discover, pile moves) | HP retained this combat = `end_hp / start_hp` (**≥1.0 = perfect win**) |
+| `card` (three heads) | card rewards, **the shop** (buy card/relic/potion, remove card, leave), **and event/ancient choices** | overall **game victory** (+ small act/floor progress shaping) |
 | `path` | which map node to enter | overall **game victory** (+ progress shaping) |
 
 Potions are part of the combat action space (`encoding.py`): the combat agent can
 use a potion (optionally targeted) **or discard one to free a slot** when the belt
 is full. The card agent has a second head for the shop, so drafting *and*
-buying/removing are learned together (`agents.py: CardAgent`). The card and path
-agents observe **gold**, so drafting/pathing can plan around affording shop buys
-and card removal. Events, rest sites (default: heal), and bundles use fixed
-defaults for now.
+buying/removing are learned together (`agents.py: CardAgent`). A shop holds up to
+**7 cards** (5 colored + 2 colorless). The card and path agents observe **gold**,
+so drafting/pathing can plan around affording shop buys and card removal.
 
-The combat observation includes **character-specific mechanics** so the agent
-can reason about them, not just play legally: Regent **stars** + per-card **star
-cost**, Defect **orbs** (passive/evoke/type), and Necrobinder **Osty** (alive /
-HP / block). Action legality (`can_play`) already handles per-character costs.
+**Events and ancient nodes** (including Neow) both arrive as the `event_choice`
+decision — the engine resolves the name from the ancients table first, then events
+— so a single third head on the card agent handles both. It encodes each option
+generically (identity hash + signed resource magnitudes: gold / hp-cost / hp-heal
+from the option's `vars`) and masks out locked options, rewarded by game victory
+like the other card heads. Rest sites (default: heal) and bundles still use fixed
+defaults.
+
+The combat net (`agents.CombatNet`) uses a learned **card embedding**: `encode_combat`
+returns `(dense, card_ids)`, and the net embeds each card id (compact, learns card
+similarity, ~6× smaller input than a one-hot, faster). It also has a **selection head**
+(`score_select`) that scores candidate cards for **in-combat `card_select`** prompts —
+the single root mechanic behind Armaments/Dual Wield/Exhume/discover and all
+draw↔hand↔discard↔exhaust pile moves — so the combat agent (not a dumb default) makes
+those picks, rewarded by that combat's HP retained.
+
+The combat observation (`encoding.py`) is built to be a **generalizing policy** — enough
+that the extracted combat agent can serve as an MCTS prior in live games. It includes:
+- **Card identity** via an embedding over a deterministic **vocabulary** (~606 ids from
+  `cards.json`, sorted; unknown ids hash into a small tail). Upgrade/enchant behavior is
+  captured by a **factored** representation (upgrade level, hashed effect profile,
+  keywords, enchant markers) so Strike / Strike+ / enchanted-Strike are distinct.
+- **Owned relics** (hashed multi-hot) so play can condition on relic effects
+  (Burning Blood, Strength/energy relics, attack/block triggers).
+- **Enemy intent type** (Attack/Defend/Buff/Debuff/…, hashed) alongside the
+  **sim-resolved** incoming damage (all enemy Strength/Weak and player Vulnerable
+  folded in; multi-hit uses `total_damage`).
+- Card damage resolved via `damage_by_target`/`calculateddamage` (so computed cards
+  like Unleash aren't seen as 0).
+- **Character-specific mechanics**: Regent **stars** + per-card **star cost**,
+  Defect **orbs** (passive/evoke/type), Necrobinder **Osty** (alive/HP/block).
+
+Action legality (`can_play`) is the game's own native check and already handles
+per-character costs. (Osty is **not** a legality gate in this build — a dead Osty
+just lowers Unleash's damage, which the resolved-damage encoding already reflects.)
 Remaining limitation: cards that must *target Osty* aren't a distinct action
 (the space targets enemies or is untargeted); most Osty interactions are
 untargeted so this rarely bites, but it's the next thing to add if Necrobinder

@@ -169,6 +169,9 @@ class Program
                 return sim.SetPlayer(args);
             }
 
+            case "advance_act":          // TEST-ONLY: jump to the next act
+                return sim.AdvanceAct();
+
             case "enter_room":
             {
                 var roomType = cmd.TryGetProperty("type", out var rt) ? rt.GetString() ?? "" : "";

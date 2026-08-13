@@ -5,6 +5,13 @@ public class CanvasItem : Node
 {
     public Color Modulate { get; set; } = Color.White;
     public Color SelfModulate { get; set; } = Color.White;
+    // Godot exposes both the property and the Set*/Get* method forms; game code calls
+    // the method form (e.g. Test Subject boss VFX → SetSelfModulate), which otherwise
+    // throws MissingMethodException and kills the combat turn loop.
+    public void SetModulate(Color c) => Modulate = c;
+    public Color GetModulate() => Modulate;
+    public void SetSelfModulate(Color c) => SelfModulate = c;
+    public Color GetSelfModulate() => SelfModulate;
     public bool Visible { get; set; } = true;
     public virtual void Show() => Visible = true;
     public virtual void Hide() => Visible = false;

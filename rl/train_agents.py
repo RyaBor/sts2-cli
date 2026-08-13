@@ -44,9 +44,16 @@ def col(char: str, text: str) -> str:
 
 
 def run_reward(res: dict) -> float:
-    """Card/path return: overall victory, shaped by act/floor progress so there's
-    a learning gradient before wins become common."""
-    return 1.0 * float(res["victory"]) + 0.15 * (float(res["act"]) - 1) + 0.01 * float(res["floor"])
+    """Card/path/event return. Overall victory is the true goal but it's sparse
+    (≈0% early), so it gives those agents almost no gradient. We add a dense
+    milestone for **defeating each act boss** (won combat tagged BOSS) plus small
+    act/floor shaping, so drafting/pathing/events get a real signal long before
+    full runs are won."""
+    boss_wins = sum(1 for c in res["combats"] if c["tier"] == "BOSS" and c["won"])
+    return (1.0 * float(res["victory"])
+            + 0.5 * boss_wins                       # each act boss cleared
+            + 0.15 * (float(res["act"]) - 1)
+            + 0.01 * float(res["floor"]))
 
 
 def hp_retained(c: dict) -> float:
@@ -56,7 +63,10 @@ def hp_retained(c: dict) -> float:
 def collect(agents, characters, n_runs, base_seed, greedy):
     """Play n_runs full runs; return (samples-per-agent, combat/victory stats)."""
     # each buffer: obs, mask, action, return
-    buf = {k: [[], [], [], []] for k in ("combat", "card", "shop", "path")}
+    buf = {k: [[], [], [], []] for k in
+           ("card", "shop", "event", "rest", "upgrade", "path")}
+    buf["combat"] = [[], [], [], [], []]      # dense, card_ids, mask, action, return
+    buf["cselect"] = [[], [], [], [], [], []]  # glob, cand_dense, cand_ids, n, action, return
     stats = {"combats": [], "victories": 0, "runs": 0, "runs_detail": []}
     for i in range(n_runs):
         char = characters[i % len(characters)]
@@ -73,21 +83,34 @@ def collect(agents, characters, n_runs, base_seed, greedy):
         stats["victories"] += int(res["victory"])
         stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"])))
         rr = run_reward(res)
-        for (obs, mask, a, cid) in res["combat_samples"]:
+        for (dense, ids, mask, a, cid) in res["combat_samples"]:
             if cid < 0:
                 continue
-            buf["combat"][0].append(obs); buf["combat"][1].append(mask)
-            buf["combat"][2].append(a); buf["combat"][3].append(hp_retained(res["combats"][cid]))
-        for key in ("card", "shop", "path"):           # all rewarded by game victory (rr)
+            r = hp_retained(res["combats"][cid])
+            buf["combat"][0].append(dense); buf["combat"][1].append(ids)
+            buf["combat"][2].append(mask); buf["combat"][3].append(a); buf["combat"][4].append(r)
+        for (glob, cd, ci, n, a, cid) in res["select_samples"]:   # in-combat card selects
+            if cid < 0:
+                continue
+            r = hp_retained(res["combats"][cid])
+            for j, val in enumerate((glob, cd, ci, n, a, r)):
+                buf["cselect"][j].append(val)
+        for key in ("card", "shop", "event", "rest", "upgrade", "path"):  # rewarded by victory (rr)
             for (obs, mask, a) in res[f"{key}_samples"]:
                 buf[key][0].append(obs); buf[key][1].append(mask)
                 buf[key][2].append(a); buf[key][3].append(rr)
         for c in res["combats"]:
             stats["combats"].append((char, c["tier"], c["won"], hp_retained(c)))
         cw = sum(1 for c in res['combats'] if c['won'])
+        # Surface WHY a run produced no combats (the "0/0" case) or ended abnormally,
+        # so the cause shows up in real training logs instead of being a mystery.
+        why = ""
+        er = res.get("end_reason", "")
+        if len(res["combats"]) == 0 or er.startswith(("error", "stuck")):
+            why = f"  [{er} @ {res.get('last_decision')}]"
         print(col(char, f"  run {i:3d} {char:11s} A10  {'WIN ' if res['victory'] else 'lose'} "
                         f"act{res['act']} floor{res['floor']:2d} "
-                        f"combats {cw}/{len(res['combats'])}"))
+                        f"combats {cw}/{len(res['combats'])}{why}"))
     return buf, stats
 
 
@@ -162,7 +185,9 @@ def main():
         buf, stats = collect(agents, chars, args.runs, f"{args.seed}-{it}", greedy=False)
         losses = {}
         losses["combat"] = agents["combat"].learn(*buf["combat"])
-        losses["card"] = agents["card"].learn(buf["card"], buf["shop"])   # reward + shop heads
+        agents["combat"].learn_select(*buf["cselect"])          # in-combat card selects
+        losses["card"] = agents["card"].learn(                       # 5 heads
+            buf["card"], buf["shop"], buf["event"], buf["rest"], buf["upgrade"])
         losses["path"] = agents["path"].learn(*buf["path"])
         wr = report(stats)
         print(f"   losses {({k: round(v,3) for k,v in losses.items()})}  "

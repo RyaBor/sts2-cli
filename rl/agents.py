@@ -1,7 +1,7 @@
 """Three cooperating policy agents for full A10 runs, trained by REINFORCE.
 
   combat_agent : plays cards in combat        (reward = HP retained this combat)
-  card_agent   : picks card rewards           (reward = overall game victory)
+  card_agent   : card rewards + shop + events/ancients   (reward = game victory)
   path_agent   : picks the next map node      (reward = overall game victory)
 
 Combat reuses the fixed obs/action space in encoding.py. Card/path use the
@@ -15,7 +15,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from encoding import OBS_DIM, N_ACTIONS, encode_obs, action_mask, decode_action  # noqa: F401
+from encoding import (N_ACTIONS, DENSE_DIM, EMBED_DIM, CARD_VOCAB_SIZE, PAD_CARD,
+                      MAX_HAND, CARD_DENSE, SEL_GLOBAL, MAX_SEL,
+                      encode_combat, encode_select, action_mask, decode_action)  # noqa: F401
+import torch.nn.functional as F
 
 
 def _bucket(s, n: int) -> int:
@@ -109,8 +112,155 @@ def map_mask(state) -> np.ndarray:
     return m
 
 
+# ── event / ancient encoding (handled by the card/economy agent) ───────────
+# Events AND ancient nodes both arrive as decision "event_choice" (the engine
+# resolves the name from the ancients table first, then events). Each option has
+# {index, title, is_locked, vars:{Gold,HpLoss,Heal,...}}. We keep this generic:
+# option identity via a hash + a few signed resource magnitudes (gold / hp-cost /
+# hp-or-heal gain), rewarded by overall game victory like the rest of the agent.
+MAX_OPTIONS = 6
+EV_NAME_HASH = 32
+OPT_HASH = 32
+OPT_VARS = 3                          # gold, hp-cost, hp/heal-gain (normalized)
+OPT_FEATS = 2 + OPT_VARS + OPT_HASH   # present, is_locked, vars, id-hash
+EV_GLOBAL = 6                         # hp, act, floor, gold, deck_size, n_options
+EV_OBS = EV_GLOBAL + EV_NAME_HASH + MAX_OPTIONS * OPT_FEATS
+EV_ACTIONS = MAX_OPTIONS
+
+
+def _opt_vars(opt) -> tuple[float, float, float]:
+    """Pull signed resource magnitudes out of an option's `vars` dict, matched by
+    key substring so it works across events without a per-event table."""
+    gold = hp_cost = hp_gain = 0.0
+    for k, v in (opt.get("vars") or {}).items():
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            continue                                  # e.g. RandomCard resolves to a name
+        ku = str(k).upper()
+        if "GOLD" in ku:
+            gold += val
+        elif any(s in ku for s in ("HEAL", "MAXHP", "MAX_HP")):
+            hp_gain += val
+        elif any(s in ku for s in ("HPLOSS", "HP_LOSS", "LOSE", "DAMAGE", "DMG", "COST")):
+            hp_cost += val
+    return gold, hp_cost, hp_gain
+
+
+def encode_event(state) -> np.ndarray:
+    out = np.zeros(EV_OBS, np.float32)
+    p = state.get("player") or {}
+    out[0] = float(p.get("hp") or 0) / max(float(p.get("max_hp") or 1), 1)
+    out[1] = float(_ctx(state, "act", 1)) / 3.0
+    out[2] = float(_ctx(state, "floor", 0)) / 50.0
+    out[3] = float(p.get("gold") or 0) / 300.0
+    out[4] = float(p.get("deck_size") or 0) / 40.0
+    opts = state.get("options") or []
+    out[5] = len(opts) / MAX_OPTIONS
+    out[EV_GLOBAL + _bucket(state.get("event_name") or "", EV_NAME_HASH)] = 1.0
+    base0 = EV_GLOBAL + EV_NAME_HASH
+    for i, o in enumerate(opts[:MAX_OPTIONS]):
+        b = base0 + i * OPT_FEATS
+        gold, hp_cost, hp_gain = _opt_vars(o)
+        out[b + 0] = 1.0
+        out[b + 1] = 1.0 if o.get("is_locked") else 0.0
+        out[b + 2] = gold / 100.0
+        out[b + 3] = hp_cost / 30.0
+        out[b + 4] = hp_gain / 30.0
+        out[b + 5 + _bucket(o.get("text_key") or o.get("title") or "", OPT_HASH)] = 1.0
+    return out
+
+
+def event_mask(state) -> np.ndarray:
+    m = np.zeros(EV_ACTIONS, bool)
+    opts = state.get("options") or []
+    for i, o in enumerate(opts[:MAX_OPTIONS]):
+        if not o.get("is_locked"):
+            m[i] = True
+    if not m.any() and opts:          # all locked (rare): allow the first, best effort
+        m[0] = True
+    return m
+
+
+# ── rest-site option choice (handled by the card/economy agent) ────────────
+# Options carry {index, option_id (HEAL/SMITH/DIG/...), is_enabled}. Generic:
+# option-id hash + enabled flag, so heal-vs-upgrade-vs-dig is a learned tradeoff.
+MAX_REST = 6
+REST_OPT_HASH = 16
+REST_GLOBAL = 4                       # hp, act, floor, deck_size
+REST_FEATS = 2 + REST_OPT_HASH        # present, enabled, id-hash
+REST_OBS = REST_GLOBAL + MAX_REST * REST_FEATS
+REST_ACTIONS = MAX_REST
+
+
+def encode_rest(state) -> np.ndarray:
+    out = np.zeros(REST_OBS, np.float32)
+    p = state.get("player") or {}
+    out[0] = float(p.get("hp") or 0) / max(float(p.get("max_hp") or 1), 1)
+    out[1] = float(_ctx(state, "act", 1)) / 3.0
+    out[2] = float(_ctx(state, "floor", 0)) / 50.0
+    out[3] = float(p.get("deck_size") or 0) / 40.0
+    for i, o in enumerate((state.get("options") or [])[:MAX_REST]):
+        b = REST_GLOBAL + i * REST_FEATS
+        out[b + 0] = 1.0
+        out[b + 1] = 1.0 if o.get("is_enabled", True) else 0.0
+        out[b + 2 + _bucket(o.get("option_id") or o.get("name") or "", REST_OPT_HASH)] = 1.0
+    return out
+
+
+def rest_mask(state) -> np.ndarray:
+    m = np.zeros(REST_ACTIONS, bool)
+    opts = state.get("options") or []
+    for i, o in enumerate(opts[:MAX_REST]):
+        if o.get("is_enabled", True):
+            m[i] = True
+    if not m.any() and opts:
+        m[0] = True
+    return m
+
+
+# ── upgrade-target choice at a rest-site smith (card/economy agent) ─────────
+# The smith opens a card_select over upgradeable deck cards; the card agent picks
+# WHICH card to upgrade. Deck can be large, so this space is bigger than a reward.
+MAX_UPG = 32
+UPG_HASH = 48
+UPG_GLOBAL = 4                        # hp, act, floor, n_cards
+UPG_FEATS = 6 + UPG_HASH              # present, cost, atk, skill, power, dmg+block, id-hash
+UPG_OBS = UPG_GLOBAL + MAX_UPG * UPG_FEATS
+UPG_ACTIONS = MAX_UPG
+
+
+def encode_upgrade(state) -> np.ndarray:
+    out = np.zeros(UPG_OBS, np.float32)
+    p = state.get("player") or {}
+    out[0] = float(p.get("hp") or 0) / max(float(p.get("max_hp") or 1), 1)
+    out[1] = float(_ctx(state, "act", 1)) / 3.0
+    out[2] = float(_ctx(state, "floor", 0)) / 50.0
+    cards = state.get("cards") or []
+    out[3] = len(cards) / MAX_UPG
+    for i, c in enumerate(cards[:MAX_UPG]):
+        b = UPG_GLOBAL + i * UPG_FEATS
+        stats = c.get("stats") or {}
+        t = str(c.get("type") or "")
+        out[b + 0] = 1.0
+        out[b + 1] = float(c.get("cost") or 0) / 3.0
+        out[b + 2] = 1.0 if t == "Attack" else 0.0
+        out[b + 3] = 1.0 if t == "Skill" else 0.0
+        out[b + 4] = 1.0 if t == "Power" else 0.0
+        out[b + 5] = (float(stats.get("damage") or 0) + float(stats.get("block") or 0)) / 30.0
+        out[b + 6 + _bucket(c.get("id") or c.get("name") or "", UPG_HASH)] = 1.0
+    return out
+
+
+def upgrade_mask(state) -> np.ndarray:
+    m = np.zeros(UPG_ACTIONS, bool)
+    for i in range(min(len(state.get("cards") or []), MAX_UPG)):
+        m[i] = True                       # engine already filtered to upgradeable cards
+    return m
+
+
 # ── shop encoding (handled by the card/economy agent) ──────────────────────
-MAX_SHOP_CARDS = 5
+MAX_SHOP_CARDS = 7          # 5 colored + 2 colorless (Courier can add more; rare)
 MAX_SHOP_RELICS = 3
 MAX_SHOP_POTIONS = 3
 SHOP_HASH = 48
@@ -241,14 +391,152 @@ class Agent:
         self.net.load_state_dict(torch.load(path, map_location=self.device))
 
 
+class CombatNet(nn.Module):
+    """Combat policy/value net with a learned card **embedding**. Card identity is an
+    integer per hand slot (not a 640-wide one-hot); nn.Embedding maps it to a compact
+    vector, so the net learns card similarity, uses far fewer params, and runs faster.
+    The embeddings are concatenated with the dense combat features and fed to the MLP."""
+
+    def __init__(self, dense_dim: int, n_actions: int, hidden: int = 512, depth: int = 3):
+        super().__init__()
+        self.embed = nn.Embedding(CARD_VOCAB_SIZE + 1, EMBED_DIM, padding_idx=PAD_CARD)
+        layers, d = [], dense_dim + MAX_HAND * EMBED_DIM
+        for _ in range(depth):
+            layers += [nn.Linear(d, hidden), nn.ReLU()]
+            d = hidden
+        self.body = nn.Sequential(*layers)
+        self.pi = nn.Linear(hidden, n_actions)
+        self.v = nn.Linear(hidden, 1)
+        # in-combat card-selection head: scores each candidate card (shares the card
+        # embedding), for Armaments/Dual Wield/Exhume/discover/pile-move selects.
+        self.sel = nn.Sequential(nn.Linear(SEL_GLOBAL + CARD_DENSE + EMBED_DIM, 128),
+                                 nn.ReLU(), nn.Linear(128, 1))
+
+    def forward(self, dense, ids):
+        emb = self.embed(ids).reshape(ids.shape[0], -1)     # (B, MAX_HAND*EMBED_DIM)
+        h = self.body(torch.cat([dense, emb], dim=-1))
+        return self.pi(h), self.v(h).squeeze(-1)
+
+    def score_select(self, glob, cand_dense, cand_ids):
+        emb = self.embed(cand_ids)                          # (B, MAX_SEL, EMBED_DIM)
+        g = glob.unsqueeze(1).expand(-1, cand_dense.shape[1], -1)
+        x = torch.cat([g, cand_dense, emb], dim=-1)
+        return self.sel(x).squeeze(-1)                      # (B, MAX_SEL)
+
+
+class CombatAgent:
+    """Combat policy over the (dense, card_ids) observation. Same actor-critic update
+    as Agent, but the forward pass takes two tensors (dense features + card ids)."""
+
+    def __init__(self, device: str = "cpu", lr: float = 3e-4, hidden: int = 512):
+        self.name = "combat"
+        self.device = torch.device(device)
+        self.net = CombatNet(DENSE_DIM, N_ACTIONS, hidden=hidden).to(self.device)
+        self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
+
+    def act(self, dense, ids, mask, greedy: bool = False) -> int:
+        with torch.no_grad():
+            d = torch.as_tensor(dense, dtype=torch.float32, device=self.device).unsqueeze(0)
+            ii = torch.as_tensor(ids, dtype=torch.long, device=self.device).unsqueeze(0)
+            logits, _ = self.net(d, ii)
+        logits = logits.squeeze(0).cpu().numpy()
+        logits[~mask] = -1e9
+        if greedy:
+            return int(np.argmax(logits))
+        logits -= logits.max()
+        pr = np.exp(logits)
+        pr /= pr.sum()
+        return int(np.random.choice(len(pr), p=pr))
+
+    def learn(self, dense, ids, masks, actions, returns,
+              value_coef: float = 0.5, entropy_coef: float = 0.01) -> float:
+        if len(dense) == 0:
+            return 0.0
+        d = torch.as_tensor(np.asarray(dense), dtype=torch.float32, device=self.device)
+        ii = torch.as_tensor(np.asarray(ids), dtype=torch.long, device=self.device)
+        m = torch.as_tensor(np.asarray(masks), device=self.device)
+        a = torch.as_tensor(np.asarray(actions), dtype=torch.long, device=self.device)
+        ret = torch.as_tensor(np.asarray(returns), dtype=torch.float32, device=self.device)
+        logits, v = self.net(d, ii)
+        logits = logits.masked_fill(~m, -1e9)
+        logp_all = torch.log_softmax(logits, dim=-1)
+        logp = logp_all.gather(1, a.unsqueeze(1)).squeeze(1)
+        adv = (ret - v).detach()
+        p_loss = -(logp * adv).mean()
+        v_loss = F.mse_loss(v, ret)
+        ent = -(logp_all.exp() * logp_all).sum(-1).mean()
+        loss = p_loss + value_coef * v_loss - entropy_coef * ent
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
+        return float(loss.item())
+
+    def act_select(self, glob, cand_dense, cand_ids, n, min_sel=1, greedy=False):
+        """Pick which candidate card(s) to select. Returns a list of indices; the
+        first is the 'primary' pick used for the gradient. min_sel>1 fills the rest
+        greedily by score (approximate; the common case is a single pick)."""
+        with torch.no_grad():
+            g = torch.as_tensor(glob, dtype=torch.float32, device=self.device).unsqueeze(0)
+            cd = torch.as_tensor(cand_dense, dtype=torch.float32, device=self.device).unsqueeze(0)
+            ci = torch.as_tensor(cand_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+            scores = self.net.score_select(g, cd, ci).squeeze(0).cpu().numpy()
+        n = max(1, min(int(n), MAX_SEL))
+        scores[n:] = -1e9
+        k = max(1, min(int(min_sel or 1), n))
+        if greedy:
+            order = list(np.argsort(-scores))
+            return order[:k]
+        s = scores - scores.max()
+        pr = np.exp(s)
+        pr /= pr.sum()
+        first = int(np.random.choice(len(pr), p=pr))
+        rest = [j for j in np.argsort(-scores) if j != first][:k - 1]
+        return [first] + rest
+
+    def learn_select(self, globs, cand_denses, cand_ids, ns, actions, returns,
+                     entropy_coef: float = 0.01) -> float:
+        if len(globs) == 0:
+            return 0.0
+        g = torch.as_tensor(np.asarray(globs), dtype=torch.float32, device=self.device)
+        cd = torch.as_tensor(np.asarray(cand_denses), dtype=torch.float32, device=self.device)
+        ci = torch.as_tensor(np.asarray(cand_ids), dtype=torch.long, device=self.device)
+        a = torch.as_tensor(np.asarray(actions), dtype=torch.long, device=self.device)
+        ret = torch.as_tensor(np.asarray(returns), dtype=torch.float32, device=self.device)
+        ns = torch.as_tensor(np.asarray(ns), dtype=torch.long, device=self.device)
+        scores = self.net.score_select(g, cd, ci)                 # (B, MAX_SEL)
+        valid = torch.arange(scores.shape[1], device=self.device).unsqueeze(0) < ns.unsqueeze(1)
+        scores = scores.masked_fill(~valid, -1e9)
+        logp_all = torch.log_softmax(scores, dim=-1)
+        logp = logp_all.gather(1, a.unsqueeze(1)).squeeze(1)
+        adv = (ret - ret.mean()).detach()                         # mean-baseline (no value head)
+        ent = -(logp_all.exp() * logp_all).sum(-1).mean()
+        loss = -(logp * adv).mean() - entropy_coef * ent
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
+        return float(loss.item())
+
+    def save(self, path: str):
+        torch.save(self.net.state_dict(), path)
+
+    def load(self, path: str):
+        self.net.load_state_dict(torch.load(path, map_location=self.device))
+
+
 class CardAgent:
-    """The card/economy agent: one logical agent, two policy heads — card rewards
-    and the shop (buy card/relic/potion, remove card, leave). Both rewarded by
-    overall game victory. Saved/loaded as one agent (two .pt files)."""
+    """The card/economy agent: one logical agent, five policy heads — card rewards,
+    the shop (buy card/relic/potion, remove card, leave), event/ancient choices,
+    rest-site option choice, and the rest-site smith upgrade-target choice. All
+    rewarded by overall game victory. Saved/loaded as one agent (five .pt files)."""
+
+    _HEADS = ("reward", "shop", "event", "rest", "upgrade")
 
     def __init__(self, device: str = "cpu"):
         self.reward = Agent("card_reward", CS_OBS, CS_ACTIONS, device=device)
         self.shop = Agent("card_shop", SHOP_OBS, SHOP_ACTIONS, device=device)
+        self.event = Agent("card_event", EV_OBS, EV_ACTIONS, device=device)
+        self.rest = Agent("card_rest", REST_OBS, REST_ACTIONS, device=device)
+        self.upgrade = Agent("card_upgrade", UPG_OBS, UPG_ACTIONS, device=device)
 
     def act_reward(self, obs, mask, greedy=False):
         return self.reward.act(obs, mask, greedy)
@@ -256,29 +544,45 @@ class CardAgent:
     def act_shop(self, obs, mask, greedy=False):
         return self.shop.act(obs, mask, greedy)
 
-    def learn(self, reward_batch, shop_batch) -> float:
-        a = self.reward.learn(*reward_batch)
-        b = self.shop.learn(*shop_batch)
-        return (a + b) / 2
+    def act_event(self, obs, mask, greedy=False):
+        return self.event.act(obs, mask, greedy)
+
+    def act_rest(self, obs, mask, greedy=False):
+        return self.rest.act(obs, mask, greedy)
+
+    def act_upgrade(self, obs, mask, greedy=False):
+        return self.upgrade.act(obs, mask, greedy)
+
+    def learn(self, reward_batch, shop_batch, event_batch, rest_batch, upgrade_batch) -> float:
+        losses = [self.reward.learn(*reward_batch), self.shop.learn(*shop_batch),
+                  self.event.learn(*event_batch), self.rest.learn(*rest_batch),
+                  self.upgrade.learn(*upgrade_batch)]
+        return sum(losses) / len(losses)
 
     def _base(self, path):
         return path[:-3] if path.endswith(".pt") else path
 
     def save(self, path):
-        self.reward.save(self._base(path) + ".reward.pt")
-        self.shop.save(self._base(path) + ".shop.pt")
+        for sub in self._HEADS:
+            getattr(self, sub).save(self._base(path) + f".{sub}.pt")
 
     def load(self, path):
         import os
-        for sub, agent in (("reward", self.reward), ("shop", self.shop)):
+        # Per-head try/except: a shape mismatch on one head (e.g. an old shop.pt
+        # from before MAX_SHOP_CARDS grew, or a run with no event/rest/upgrade.pt
+        # yet) must not block the other, still-compatible heads from loading.
+        for sub in self._HEADS:
             p = self._base(path) + f".{sub}.pt"
             if os.path.exists(p):
-                agent.load(p)
+                try:
+                    getattr(self, sub).load(p)
+                except Exception as e:
+                    print(f"  [card.{sub}] not loaded ({e.__class__.__name__}); starting fresh")
 
 
 def make_agents(device: str = "cpu") -> dict:
     return {
-        "combat": Agent("combat", OBS_DIM, N_ACTIONS, device=device),
+        "combat": CombatAgent(device=device),      # embedding net over (dense, card_ids)
         "card": CardAgent(device=device),
         "path": Agent("path", PS_OBS, PS_ACTIONS, device=device),
     }

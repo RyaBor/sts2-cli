@@ -237,6 +237,9 @@ public class RunSimulator
     private bool _rewardsProcessed;
     private int _goldBeforeCombat;
     private int _lastKnownHp;
+    // A10 Act-3 "double boss": true once we've started the SECOND boss combat so we
+    // don't loop back into it. Reset when a new act is entered / a run starts.
+    private bool _secondBossStarted;
     private readonly HeadlessCardSelector _cardSelector = new();
     // Pending bundle selection (Scroll Boxes: pick 1 of N packs)
     private IReadOnlyList<IReadOnlyList<CardModel>>? _pendingBundles;
@@ -290,6 +293,7 @@ public class RunSimulator
             // Enter first act (generates map)
             RunManager.Instance.EnterAct(0, doTransition: false).GetAwaiter().GetResult();
             Log("Entered Act 0");
+            _secondBossStarted = false;
 
             // Register card selector for cards that need player choice
             CardSelectCmd.UseSelector(_cardSelector);
@@ -568,6 +572,24 @@ public class RunSimulator
             return DetectDecisionPoint();
         }
         catch (Exception ex) { return ErrorWithTrace("EnterRoom failed", ex); }
+    }
+
+    /// <summary>TEST-ONLY: jump forward one act (EnterNextAct + between-act heal), so
+    /// tests can reach Act 3 without playing a whole run. Not used in normal play.</summary>
+    public Dictionary<string, object?> AdvanceAct()
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            HealBetweenActs();
+            _secondBossStarted = false;
+            Log($"[TEST] Advanced to Act {_runState.CurrentActIndex + 1}");
+            return DetectDecisionPoint();
+        }
+        catch (Exception ex) { return ErrorWithTrace("AdvanceAct failed", ex); }
     }
 
     public Dictionary<string, object?> SetDrawOrder(List<string> cardIds)
@@ -2469,15 +2491,29 @@ public class RunSimulator
         {
             if (combatRoom.IsPreFinished || !CombatManager.Instance.IsInProgress)
             {
-                // Final act boss → victory (same rule as DetectPostCombatState, #81).
-                if (_runState != null && _runState.CurrentActIndex >= 2)
+                bool lastAct = _runState != null && _runState.CurrentActIndex >= 2;
+                if (lastAct)
                 {
-                    Log($"Final boss defeated via Proceed (Act {_runState.CurrentActIndex + 1}), reporting victory");
+                    // A10 Act-3 double boss — same rule as DetectPostCombatState.
+                    if (RunManager.Instance.IsGameOver)
+                    {
+                        Log("Run over (IsGameOver) after boss via Proceed — reporting victory");
+                        return GameOverState(true);
+                    }
+                    if (!_secondBossStarted && ActHasSecondBoss() && TryStartSecondBoss())
+                    {
+                        _secondBossStarted = true;
+                        _rewardsProcessed = false;
+                        Log("First Act-3 boss defeated via Proceed; starting SECOND boss");
+                        return DetectDecisionPoint();
+                    }
+                    Log($"Final boss defeated via Proceed (Act {_runState!.CurrentActIndex + 1}), reporting victory");
                     return GameOverState(true);
                 }
                 RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
                 WaitForActionExecutor();
                 HealBetweenActs();
+                _secondBossStarted = false;
                 return DetectDecisionPoint();
             }
         }
@@ -2906,6 +2942,8 @@ public class RunSimulator
                 ["can_play"] = c.CanPlay(out _, out _),
                 ["target_type"] = c.TargetType.ToString(),
                 ["stats"] = stats.Count > 0 ? stats : null,
+                ["upgraded"] = c.IsUpgraded,
+                ["upgrade_level"] = c.CurrentUpgradeLevel,
                 ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
             };
             if (starCost > 0)
@@ -3126,15 +3164,30 @@ public class RunSimulator
         _pendingRewards = null;
         _rewardsProcessed = true;
 
-        // Boss → next act, OR final victory after the last act's boss (#81). Act index is
-        // 0-based and STS2 has 3 acts (0/1/2); killing the Act-3 (index 2) boss has no next
-        // act — EnterNextAct NREs and DetectDecisionPoint falls through to an empty
-        // map_select. Report victory directly in that case.
+        // Boss defeated. STS2 has 3 acts (index 0/1/2). Acts 1-2 → advance to the next
+        // act. Act 3 (index 2) is the last, BUT on Ascension 10+ it is a DOUBLE BOSS:
+        // two boss combats in a row through one boss node (ascension.json LEVEL_10,
+        // "Fight two bosses at the end of Act 3"). So the FIRST Act-3 boss dying is NOT
+        // victory — start the second boss first. True victory is the game's own
+        // IsGameOver, never merely "an act-3 boss died".
         if (combatRoom.RoomType == RoomType.Boss)
         {
-            if (_runState != null && _runState.CurrentActIndex >= 2)
+            bool lastAct = _runState != null && _runState.CurrentActIndex >= 2;
+            if (lastAct)
             {
-                Log($"Final boss defeated (Act {_runState.CurrentActIndex + 1}), reporting victory");
+                if (RunManager.Instance.IsGameOver)
+                {
+                    Log("Run over (IsGameOver) after boss — reporting victory");
+                    return GameOverState(true);
+                }
+                if (!_secondBossStarted && ActHasSecondBoss() && TryStartSecondBoss())
+                {
+                    _secondBossStarted = true;
+                    _rewardsProcessed = false;      // let the 2nd boss run its own rewards
+                    Log("First Act-3 boss defeated; starting SECOND boss (A10 double boss)");
+                    return DetectDecisionPoint();
+                }
+                Log($"Final boss defeated (Act {_runState!.CurrentActIndex + 1}), reporting victory");
                 return GameOverState(true);
             }
             Log("Boss defeated, entering next act");
@@ -3144,6 +3197,7 @@ public class RunSimulator
                 _syncCtx.Pump();
                 WaitForActionExecutor();
                 HealBetweenActs();
+                _secondBossStarted = false;         // fresh act
             }
             catch (Exception ex) { Log($"EnterNextAct: {ex.Message}"); }
             return DetectDecisionPoint();
@@ -3152,6 +3206,55 @@ public class RunSimulator
         // Normal → go to map
         ForceToMap();
         return MapSelectState();
+    }
+
+    /// <summary>True if the current act has a second boss (A10+ Act-3 double boss).
+    /// Read reflectively off RunState.Act (HasSecondBoss / SecondBossEncounter) so we
+    /// degrade to single-boss behavior on builds/ascensions without it.</summary>
+    private bool ActHasSecondBoss()
+    {
+        try
+        {
+            var act = _runState?.Act;
+            if (act == null) return false;
+            var hasProp = act.GetType().GetProperty("HasSecondBoss");
+            if (hasProp?.GetValue(act) is bool b) return b;
+            return GetSecondBossEncounter() != null;   // fallback: infer from encounter
+        }
+        catch (Exception ex) { Log($"ActHasSecondBoss: {ex.Message}"); return false; }
+    }
+
+    private object? GetSecondBossEncounter()
+    {
+        var act = _runState?.Act;
+        if (act == null) return null;
+        var t = act.GetType();
+        foreach (var name in new[] { "SecondBossEncounter", "NextBossEncounter" })
+        {
+            var v = t.GetProperty(name)?.GetValue(act);
+            if (v != null) return v;
+        }
+        return null;
+    }
+
+    /// <summary>Start the second Act-3 boss as a fresh combat on the same node. Mirrors
+    /// the normal boss-combat setup (EncounterModel.ToMutable → new CombatRoom →
+    /// EnterRoom). Returns false (→ caller reports victory) if it can't be resolved.</summary>
+    private bool TryStartSecondBoss()
+    {
+        try
+        {
+            if (_runState == null) return false;
+            var enc = GetSecondBossEncounter();
+            if (enc == null) { Log("TryStartSecondBoss: no second-boss encounter"); return false; }
+            var mut = enc.GetType().GetMethod("ToMutable")?.Invoke(enc, null) ?? enc;
+            var room = new CombatRoom((dynamic)mut, _runState);
+            RunManager.Instance.EnterRoom(room).GetAwaiter().GetResult();
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            return true;
+        }
+        catch (Exception ex) { Log($"TryStartSecondBoss: {ex.Message}"); return false; }
     }
 
     private Dictionary<string, object?> CardRewardState(Player player, CombatRoom? combatRoom)
