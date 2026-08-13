@@ -90,7 +90,7 @@ def collect(agents, characters, n_runs, base_seed, greedy):
             eng.close()
         stats["runs"] += 1
         stats["victories"] += int(res["victory"])
-        stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"])))
+        stats["runs_detail"].append((char, bool(res["victory"]), float(res["floor"]), float(res["act"])))
         rr = run_reward(res)
         for (dense, ids, mask, a, cid) in res["combat_samples"]:
             if cid < 0:
@@ -133,9 +133,9 @@ def report(stats, it=0, secs=0.0, best=None):
     cw = sum(1 for _, _, w, _ in combats if w)
     combat_wr = cw / n if n else 0.0
     hp = (sum(h for *_, h in combats) / n) if n else 0.0
-    gw = sum(1 for _, v, _ in rd if v)
+    gw = sum(1 for r in rd if r[1])
     game_wr = gw / R
-    avg_floor = sum(f for *_, f in rd) / R
+    avg_floor = sum(r[2] for r in rd) / R
     best["combat"] = max(best.get("combat", 0.0), combat_wr)
     best["game"] = max(best.get("game", 0.0), game_wr)
     best["floor"] = max(best.get("floor", 0.0), avg_floor)
@@ -144,11 +144,12 @@ def report(stats, it=0, secs=0.0, best=None):
     for _, t, w, _ in combats:
         tier[t][0] += int(w); tier[t][1] += 1
     tc = lambda k: f"{tier[k][0]}/{tier[k][1]}"
-    cmb = defaultdict(lambda: [0, 0])
-    for c, _, w, _ in combats:
-        cmb[c][0] += int(w); cmb[c][1] += 1
-    chars = "  ".join(col(c, f"{_ABBR.get(c, c[:4])} {(cmb[c][0]/cmb[c][1]*100 if cmb[c][1] else 0):.0f}%")
-                      for c in sorted(cmb))
+    # per-character progression: average act + floor reached this iteration
+    prog = defaultdict(lambda: [0.0, 0.0, 0])       # char -> [floor sum, act sum, runs]
+    for c, _v, f, a in rd:
+        prog[c][0] += f; prog[c][1] += a; prog[c][2] += 1
+    chars = "  ".join(col(c, f"{_ABBR.get(c, c[:4])} a{p[1]/p[2]:.0f} f{p[0]/p[2]:.0f}")
+                      for c, p in sorted(prog.items()) if p[2])
 
     print(f"\n{_BOLD}── iter {it} · {secs:.0f}s ─────────────────────────────────{_RESET}")
     print(f" combat {_BOLD}{combat_wr*100:3.0f}%{_RESET} (best {best['combat']*100:.0f}%)"
@@ -157,7 +158,7 @@ def report(stats, it=0, secs=0.0, best=None):
     print(f" fights  normal {tc('COMBAT')}   elite {tc('ELITE')}   boss {tc('BOSS')}"
           f"      events {stats.get('events', 0)}")
     if chars:
-        print(f" chars   {chars}")
+        print(f" reached {chars}")
     return combat_wr
 
 
