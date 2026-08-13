@@ -140,6 +140,12 @@ def collect(agents, characters, n_runs, base_seed, greedy, faillog=None, runlog=
             try: eng.close()
             except Exception: pass
             continue
+        except KeyboardInterrupt:                        # Ctrl-C on a stuck run -> capture it
+            print(f"\n[Ctrl-C] capturing in-flight run {char} (seed {base_seed}-{i}) for replay")
+            _log_failure(faillog, eng, char, "ctrl-c (hang?)")   # dumps action_log so far
+            try: eng.close()
+            except Exception: pass
+            raise
         eng.close()                     # normal path (eng.repro() still valid after close)
         _log_run(runlog, it, i, char, f"{base_seed}-{i}", res)   # every run -> rolling log
         stats["runs"] += 1
